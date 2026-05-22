@@ -83,6 +83,8 @@ app.get("/", (req, res) => {
 app.get("/api/stocks", (req, res) => {
   res.json(stockNews);
 });
+
+
 app.get("/api/stock-news", async (req, res) => {
   const keyword = req.query.name || req.query.code;
 
@@ -92,19 +94,23 @@ app.get("/api/stock-news", async (req, res) => {
 
   const rss = await fetchGoogleRSS(keyword);
 
-res.json([
-  {
-    time: now(),
-    keyword,
-   items: [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
-  .slice(1, 8)
-  .map(m => ({
-    title: m[1],
-    link: m[2],
-    pub: now(),
-    src: "Google RSS"
-  }))
+  res.json([
+    {
+      time: now(),
+      keyword,
+      items: [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
+        .slice(1, 8)
+        .map(m => ({
+          title: m[1],
+          link: m[2],
+          pub: now(),
+          src: "Google RSS"
+        }))
+    }
+  ]);
+});
 
+     
 app.get("/api/sectors", (req, res) => {
   res.json(sectorNews);
 });
