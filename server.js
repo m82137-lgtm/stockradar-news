@@ -92,15 +92,18 @@ app.get("/api/stock-news", async (req, res) => {
 
   const rss = await fetchGoogleRSS(keyword);
 
-  res.json([
-    {
-      time: now(),
-      keyword,
-      raw: rss.slice(0, 2000)
-    }
-  ]);
-});
-
+res.json([
+  {
+    time: now(),
+    keyword,
+    items: [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
+      .slice(1, 8)
+      .map(m => ({
+        title: m[1],
+        url: m[2]
+      }))
+  }
+]);
 
 app.get("/api/sectors", (req, res) => {
   res.json(sectorNews);
