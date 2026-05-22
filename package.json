@@ -4,8 +4,7 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",
@@ -13,6 +12,6 @@
     "node-cron": "^3.0.3"
   },
   "engines": {
-    "node": ">=20"
+    "node": "20.x"
   }
 }
