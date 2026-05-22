@@ -33,11 +33,18 @@ async function updateSectorNews() {
 
   const rss = await fetchGoogleRSS("富聯網 熱門族群");
 
-  sectorNews.unshift({
-    time: now(),
-    keyword: "富聯網 熱門族群",
-    raw: rss.slice(0, 500)
-  });
+sectorNews.unshift({
+  time: now(),
+  keyword: "雷聯網 熱門族群",
+  items: [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
+    .slice(1, 8)
+    .map(m => ({
+      title: m[1],
+      link: m[2],
+      pub: now(),
+      src: "Google RSS"
+    }))
+});
 
   sectorNews = sectorNews.slice(0, 200);
 }
