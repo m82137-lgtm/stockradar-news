@@ -78,7 +78,7 @@ cron.schedule("* 9-14 * * 1-5", async () => {
   await updateSectorNews();
 });
 
-cron.schedule("0 */3 * * *", async () => {
+cron.schedule("0 */1 * * *", async () => {
   await updateStockNews();
   await updateSectorNews();
 });
