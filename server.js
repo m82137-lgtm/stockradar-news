@@ -83,6 +83,24 @@ app.get("/", (req, res) => {
 app.get("/api/stocks", (req, res) => {
   res.json(stockNews);
 });
+app.get("/api/stock-news", async (req, res) => {
+  const keyword = req.query.name || req.query.code;
+
+  if (!keyword) {
+    return res.json([]);
+  }
+
+  const rss = await fetchGoogleRSS(keyword);
+
+  res.json([
+    {
+      time: now(),
+      keyword,
+      raw: rss.slice(0, 2000)
+    }
+  ]);
+});
+
 
 app.get("/api/sectors", (req, res) => {
   res.json(sectorNews);
