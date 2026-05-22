@@ -66,7 +66,12 @@ async function updateStockNews() {
   stockNews = stockNews.slice(0, 500);
 }
 
-cron.schedule("* * * * *", async () => {
+cron.schedule("* 9-14 * * 1-5", async () => {
+  await updateStockNews();
+  await updateSectorNews();
+});
+
+cron.schedule("0 */3 * * *", async () => {
   await updateStockNews();
   await updateSectorNews();
 });
