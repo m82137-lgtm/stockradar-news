@@ -96,14 +96,14 @@ res.json([
   {
     time: now(),
     keyword,
-    items: [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
-      .slice(1, 8)
-      .map(m => ({
-        title: m[1],
-        url: m[2]
-      }))
-  }
-]);
+   items: [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
+  .slice(1, 8)
+  .map(m => ({
+    title: m[1],
+    link: m[2],
+    pub: now(),
+    src: "Google RSS"
+  }))
 
 app.get("/api/sectors", (req, res) => {
   res.json(sectorNews);
