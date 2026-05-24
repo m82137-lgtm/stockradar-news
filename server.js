@@ -7,199 +7,148 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
 const PORT = process.env.PORT || 3000;
 
-let stockNews = [];
 let sectorNews = [];
 
 function now() {
-  return new Date().toLocaleString("zh-TW", {
-    timeZone: "Asia/Taipei"
-  });
+  return new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
+}
+
+// 正確 parse RSS pubDate，回傳台灣時間字串
+function parsePubDate(pubDateStr) {
+  if (!pubDateStr) return now();
+  try {
+    const d = new Date(pubDateStr);
+    if (isNaN(d.getTime())) return now();
+    return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
+  } catch {
+    return now();
+  }
 }
 
 async function fetchGoogleRSS(keyword) {
-
-  const url =
-    `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
-
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
   try {
-
     const res = await fetch(url);
     const text = await res.text();
-
     return text;
-
   } catch (err) {
-
     console.log("RSS error:", err.message);
     return "";
   }
 }
 
 function parseRSS(rss) {
+  // 同時抓 title、link、pubDate
+  const items = [];
+  const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+  let match;
 
-  return [...rss.matchAll(/<title>(.*?)<\/title>[\s\S]*?<link>(.*?)<\/link>/g)]
-    .slice(1, 20)
-    .map(m => ({
-      title: m[1],
-      link: m[2],
-      pub: now(),
-      src: "Google RSS"
-    }));
+  while ((match = itemRegex.exec(rss)) !== null) {
+    const block = match[1];
+
+    const titleMatch = block.match(/<title>(.*?)<\/title>/);
+    const linkMatch = block.match(/<link>(.*?)<\/link>/);
+    const pubMatch = block.match(/<pubDate>(.*?)<\/pubDate>/);
+
+    const rawTitle = titleMatch ? titleMatch[1].replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1').trim() : "";
+    const link = linkMatch ? linkMatch[1].trim() : "";
+    const pubDate = pubMatch ? pubMatch[1].trim() : "";
+
+    // 過濾掉空標題或「Google 新聞」首頁
+    if (!rawTitle || rawTitle === "Google 新聞" || rawTitle === "Google News") continue;
+
+    // 來源：標題最後 " - 來源名稱"
+    let title = rawTitle;
+    let src = "Google RSS";
+    const dashIdx = rawTitle.lastIndexOf(" - ");
+    if (dashIdx !== -1) {
+      title = rawTitle.substring(0, dashIdx).trim();
+      src = rawTitle.substring(dashIdx + 3).trim();
+    }
+
+    items.push({
+      title,
+      link,
+      pub: parsePubDate(pubDate),
+      src
+    });
+  }
+
+  return items.slice(0, 20);
 }
 
 function uniqueNews(items) {
-
   const seen = new Set();
-
   return items.filter(item => {
-
-    if (seen.has(item.link)) {
-      return false;
-    }
-
+    if (seen.has(item.link) || seen.has(item.title)) return false;
     seen.add(item.link);
+    seen.add(item.title);
     return true;
   });
 }
 
+// 熱門族群：只搜「富聯網 熱門族群」
 async function updateSectorNews() {
-
   console.log(`[${now()}] 更新熱門族群新聞`);
 
-  const searches = [
-    "熱門族群"
-  ];
-
-  let allItems = [];
-
-  for (const keyword of searches) {
-
-    const rss = await fetchGoogleRSS(keyword);
-
-    const items = parseRSS(rss);
-
-    allItems.push(...items);
-  }
+  const rss = await fetchGoogleRSS("富聯網 熱門族群");
+  const items = parseRSS(rss);
 
   sectorNews = [
     {
       time: now(),
-      keyword: "熱門族群",
-      items: uniqueNews(allItems).slice(0, 20)
+      keyword: "富聯網 熱門族群",
+      items: uniqueNews(items).slice(0, 20)
     }
   ];
 
   console.log("熱門族群新聞數量:", sectorNews[0].items.length);
 }
 
-async function updateStockNews() {
-
-  console.log(`[${now()}] 更新個股新聞`);
-
-  const keywords = [
-    { name: "台積電", code: "2330" },
-    { name: "鴻海", code: "2317" },
-    { name: "廣達", code: "2382" },
-    { name: "緯創", code: "3231" },
-    { name: "技嘉", code: "2376" }
-  ];
-
-  stockNews = [];
-
-  for (const stock of keywords) {
-
-    const searches = [
-      stock.name,
-      stock.code,
-      `${stock.name} ${stock.code}`,
-      `${stock.name} 股票`,
-      `${stock.code} 股票`
-    ];
-
-    let allItems = [];
-
-    for (const q of searches) {
-
-      const rss = await fetchGoogleRSS(q);
-
-      const items = parseRSS(rss);
-
-      allItems.push(...items);
-    }
-
-    stockNews.push({
-      time: now(),
-      keyword: `${stock.name} ${stock.code}`,
-      items: uniqueNews(allItems).slice(0, 15)
-    });
-
-    console.log(stock.name, "新聞數:", allItems.length);
-  }
-}
-
+// 盤中：週一~五 09:00~14:59 每分鐘
 cron.schedule("* 9-14 * * 1-5", async () => {
-
-  await updateStockNews();
   await updateSectorNews();
-
 });
 
+// 非盤中：每小時
 cron.schedule("0 */1 * * *", async () => {
-
-  await updateStockNews();
   await updateSectorNews();
-
 });
 
+// 健康檢查（UptimeRobot ping 用）
 app.get("/", (req, res) => {
-
   res.send("stockradar-news running");
 });
 
-app.get("/api/stocks", (req, res) => {
-
-  res.json(stockNews);
-});
-
+// 個股新聞：即時查詢，3 組關鍵字
 app.get("/api/stock-news", async (req, res) => {
+  const name = (req.query.name || "").trim();
+  const code = (req.query.code || "").trim();
 
-  const name = req.query.name || "";
-  const code = req.query.code || "";
+  if (!name && !code) {
+    return res.json([{ time: now(), keyword: "", items: [] }]);
+  }
 
   const searches = [
     name,
-    code,
     `${name} ${code}`,
-    `${name} 股票`,
-    `${code} 股票`
-  ];
+    code
+  ].filter(q => q.trim());
 
   let allItems = [];
 
   for (const q of searches) {
-
-    if (!q.trim()) continue;
-
     try {
-
       const rss = await fetchGoogleRSS(q);
-
       const items = parseRSS(rss);
-
       allItems.push(...items);
-
     } catch (e) {
-
       console.log("RSS fail:", q);
     }
   }
@@ -213,15 +162,12 @@ app.get("/api/stock-news", async (req, res) => {
   ]);
 });
 
+// 熱門族群：從快取回傳
 app.get("/api/sectors", (req, res) => {
-
   res.json(sectorNews);
 });
 
 app.listen(PORT, async () => {
-
   console.log(`Server running on ${PORT}`);
-
-  await updateStockNews();
   await updateSectorNews();
 });
