@@ -230,11 +230,19 @@ app.get("/api/stock-news", async (req, res) => {
   }]);
 });
 
-// 熱門族群：從 KV 讀取（15天歷史）
+// 熱門族群：從 KV 讀取（15天歷史），若空則即時抓一次
 app.get("/api/sectors", async (req, res) => {
   try {
-    const data = await kvGet('sectors');
-    const items = Array.isArray(data) ? data : [];
+    let data = await kvGet('sectors');
+    let items = Array.isArray(data) ? data : [];
+
+    // KV 是空的，即時抓一次
+    if (!items.length) {
+      await updateSectorNews();
+      data = await kvGet('sectors');
+      items = Array.isArray(data) ? data : [];
+    }
+
     res.json([{
       time: now(),
       keyword: "富聯網 熱門族群",
