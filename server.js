@@ -19,15 +19,15 @@ function now() {
   return new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
 }
 
-// 正確 parse RSS pubDate，回傳台灣時間字串
+// 回傳 ISO 格式，讓前端 new Date() 可以正確解析
 function parsePubDate(pubDateStr) {
-  if (!pubDateStr) return now();
+  if (!pubDateStr) return new Date().toISOString();
   try {
     const d = new Date(pubDateStr);
-    if (isNaN(d.getTime())) return now();
-    return d.toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
+    if (isNaN(d.getTime())) return new Date().toISOString();
+    return d.toISOString();
   } catch {
-    return now();
+    return new Date().toISOString();
   }
 }
 
@@ -44,7 +44,6 @@ async function fetchGoogleRSS(keyword) {
 }
 
 function parseRSS(rss) {
-  // 同時抓 title、link、pubDate
   const items = [];
   const itemRegex = /<item>([\s\S]*?)<\/item>/g;
   let match;
@@ -75,7 +74,7 @@ function parseRSS(rss) {
     items.push({
       title,
       link,
-      pub: parsePubDate(pubDate),
+      pub: parsePubDate(pubDate),  // ISO 格式，前端 new Date() 可正確解析
       src
     });
   }
