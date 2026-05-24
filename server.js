@@ -186,8 +186,8 @@ async function updateSectorNews() {
   }
 }
 
-// 盤中：週一~五 09:00~14:59 每分鐘
-cron.schedule("* 9-14 * * 1-5", async () => {
+// 盤中：週一~五 09:00~14:59 每5分鐘
+cron.schedule("*/5 9-14 * * 1-5", async () => {
   await updateSectorNews();
 });
 
