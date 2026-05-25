@@ -166,8 +166,11 @@ async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
   try {
-    const rss1 = await fetchGoogleRSS("《熱門族群》");
-    const newItems = uniqueNews(parseRSS(rss1));
+    const [rss1, rss2] = await Promise.all([
+      fetchGoogleRSS("富聯網 熱門族群"),
+      fetchGoogleRSS("《熱門族群》"),
+    ]);
+    const newItems = uniqueNews([...parseRSS(rss1), ...parseRSS(rss2)]);
 
     if (!newItems.length) {
       console.log("熱門族群：無新聞");
