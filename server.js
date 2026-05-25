@@ -191,13 +191,13 @@ async function updateSectorNews() {
   }
 }
 
-// 盤中：週一~五 台灣時間 09:00~14:59 每5分鐘
-cron.schedule("*/5 1-6 * * 1-5", { timezone: "Asia/Taipei" }, async () => {
+// 盤中：UTC 01:00~06:59（台灣時間 09:00~14:59）週一~五每5分鐘
+cron.schedule("*/5 1-6 * * 1-5", async () => {
   await updateSectorNews();
 });
 
 // 非盤中：每小時
-cron.schedule("0 */1 * * *", { timezone: "Asia/Taipei" }, async () => {
+cron.schedule("0 */1 * * *", async () => {
   await updateSectorNews();
 });
 
