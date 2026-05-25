@@ -203,8 +203,8 @@ cron.schedule("*/5 1-6 * * 1-5", async () => {
   await updateSectorNews();
 });
 
-// 非盤中：每小時
-cron.schedule("0 */1 * * *", async () => {
+// 非盤中：每5分鐘
+cron.schedule("*/5 * * * *", async () => {
   await updateSectorNews();
 });
 
