@@ -186,13 +186,13 @@ async function updateSectorNews() {
   }
 }
 
-// 盤中：週一~五 09:00~14:59 每5分鐘
-cron.schedule("*/5 9-14 * * 1-5", async () => {
+// 盤中：週一~五 台灣時間 09:00~14:59 每5分鐘
+cron.schedule("*/5 1-6 * * 1-5", { timezone: "Asia/Taipei" }, async () => {
   await updateSectorNews();
 });
 
 // 非盤中：每小時
-cron.schedule("0 */1 * * *", async () => {
+cron.schedule("0 */1 * * *", { timezone: "Asia/Taipei" }, async () => {
   await updateSectorNews();
 });
 
@@ -223,10 +223,11 @@ app.get("/api/stock-news", async (req, res) => {
     }
   }
 
+  const sorted = uniqueNews(allItems).sort((a, b) => new Date(b.pub) - new Date(a.pub)).slice(0, 15);
   res.json([{
     time: now(),
     keyword: `${name} ${code}`,
-    items: uniqueNews(allItems).slice(0, 15)
+    items: sorted
   }]);
 });
 
