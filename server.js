@@ -134,16 +134,21 @@ function hasNewItems(newItems, oldItems) {
   return (newItems || []).some(n => n.link && !oldLinks.has(n.link));
 }
 
-// 合併新舊新聞，保留 keepDays 天
+// 合併新舊新聞，保留 keepDays 天，用標題去重
 function mergeNews(newItems, oldItems, keepDays) {
   const cutoff = Date.now() - keepDays * 24 * 60 * 60 * 1000;
-  const seen = new Set();
+  const seenTitles = new Set();
+  const seenLinks = new Set();
   const merged = [];
 
   for (const item of [...newItems, ...(oldItems || [])]) {
-    const key = item.link || item.title;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // 用標題去重（主要），link 去重（次要）
+    const titleKey = item.title ? item.title.trim() : '';
+    const linkKey = item.link || '';
+    if (titleKey && seenTitles.has(titleKey)) continue;
+    if (linkKey && seenLinks.has(linkKey)) continue;
+    if (titleKey) seenTitles.add(titleKey);
+    if (linkKey) seenLinks.add(linkKey);
 
     const pubMs = new Date(item.pub).getTime();
     if (pubMs >= cutoff) merged.push(item);
