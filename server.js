@@ -119,11 +119,15 @@ function parseRSS(rss) {
 }
 
 function uniqueNews(items) {
-  const seen = new Set();
+  const seenTitles = new Set();
+  const seenLinks = new Set();
   return items.filter(item => {
-    if (seen.has(item.link) || seen.has(item.title)) return false;
-    seen.add(item.link);
-    seen.add(item.title);
+    const title = (item.title || '').trim();
+    const link = item.link || '';
+    if (title && seenTitles.has(title)) return false;
+    if (link && seenLinks.has(link)) return false;
+    if (title) seenTitles.add(title);
+    if (link) seenLinks.add(link);
     return true;
   });
 }
@@ -162,8 +166,11 @@ async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
   try {
-    const rss = await fetchGoogleRSS("富聯網 熱門族群");
-    const newItems = uniqueNews(parseRSS(rss));
+    const [rss1, rss2] = await Promise.all([
+      fetchGoogleRSS("富聯網 熱門族群"),
+      fetchGoogleRSS("時報新聞 熱門族群"),
+    ]);
+    const newItems = uniqueNews([...parseRSS(rss1), ...parseRSS(rss2)]);
 
     if (!newItems.length) {
       console.log("熱門族群：無新聞");
