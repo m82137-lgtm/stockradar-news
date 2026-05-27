@@ -191,10 +191,10 @@ async function fetchHtml(url, extraHeaders = {}) {
   }
 }
 
-// 過濾條件：標題含「熱門族群」（不限書名號）
+// 過濾條件：標題開頭含「《熱門族群》」
 function isHotSectorTitle(title) {
   if (!title) return false;
-  return title.includes("熱門族群");
+  return title.trim().startsWith("《熱門族群》");
 }
 
 // ── 富聯網爬蟲：抓「台股新聞列表」(NType=1002)，再過濾《熱門族群》──
@@ -204,6 +204,14 @@ async function fetchMoneyLink() {
     "Referer": "https://ww2.money-link.com.tw/"
   });
   if (!html) return [];
+
+  // DEBUG: 確認頁面有沒有「熱門族群」字串
+  const matches = html.match(/熱門族群/g);
+  console.log(`富聯網 DEBUG: HTML 長度=${html.length}, 「熱門族群」出現 ${matches ? matches.length : 0} 次`);
+  if (matches && matches.length > 0) {
+    const idx = html.indexOf("熱門族群");
+    console.log(`富聯網 DEBUG 上下文: ${html.substring(Math.max(0, idx-150), idx+200).replace(/\s+/g, ' ')}`);
+  }
 
   const items = [];
   // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
