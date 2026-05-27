@@ -161,16 +161,23 @@ function mergeNews(newItems, oldItems, keepDays) {
   return merged.sort((a, b) => new Date(b.pub) - new Date(a.pub));
 }
 
-// ── 通用 HTML fetch（帶瀏覽器 User-Agent 避免 403）─
+// ── 通用 HTML fetch（帶完整瀏覽器 headers 避免 403）─
 const BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-async function fetchHtml(url) {
+async function fetchHtml(url, extraHeaders = {}) {
   try {
     const res = await fetch(url, {
       headers: {
         "User-Agent": BROWSER_UA,
-        "Accept": "text/html,application/xhtml+xml",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        ...extraHeaders
       }
     });
     if (!res.ok) {
@@ -184,39 +191,39 @@ async function fetchHtml(url) {
   }
 }
 
-// 過濾條件：標題開頭含「《熱門族群》」
+// 過濾條件：標題含「熱門族群」（不限書名號）
 function isHotSectorTitle(title) {
   if (!title) return false;
-  return title.trim().startsWith("《熱門族群》");
+  return title.includes("熱門族群");
 }
 
-// ── 富聯網爬蟲：抓首頁，找標題 ──────────────────
-// 首頁 URL 含「《熱門族群》」的標題會在即時新聞列表
+// ── 富聯網爬蟲：抓「台股新聞列表」(NType=1002)，再過濾《熱門族群》──
+// 首頁只顯示少量，列表頁有完整 50+ 則
 async function fetchMoneyLink() {
-  const html = await fetchHtml("https://ww2.money-link.com.tw/");
+  const html = await fetchHtml("https://ww2.money-link.com.tw/RealtimeNews/Index.aspx?NType=1002", {
+    "Referer": "https://ww2.money-link.com.tw/"
+  });
   if (!html) return [];
 
   const items = [];
-  // 富聯網即時新聞格式：<a href="/RealtimeNews/NewsContent.aspx?SN=xxx&PU=xxx">時間《標題》...</a>
-  // 用通用 a 標籤抓
-  const linkRe = /<a[^>]+href="([^"]*RealtimeNews\/NewsContent\.aspx[^"]*)"[^>]*>([^<]+)<\/a>/gi;
+  // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
+  // 用 title 屬性抓更完整標題（顯示文字可能被截斷）
+  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*title="([^"]+)"[^>]*>/gi;
   let m;
   const seen = new Set();
   while ((m = linkRe.exec(html)) !== null) {
     let href = m[1].trim();
-    let text = m[2].trim();
-    if (!text || seen.has(href)) continue;
+    let title = m[2].trim();
+    if (!title || seen.has(href)) continue;
     seen.add(href);
 
-    // 標題前可能有時間 "09:58《熱門族群》..."，去掉前面時間
-    const cleaned = text.replace(/^\d{1,2}:\d{2}\s*/, "").trim();
-    if (!isHotSectorTitle(cleaned)) continue;
+    if (!isHotSectorTitle(title)) continue;
 
     const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw${href.startsWith("/") ? "" : "/"}${href}`;
     items.push({
-      title: cleaned,
+      title,
       link,
-      pub: new Date().toISOString(), // 首頁列表沒精確時間，用現在
+      pub: new Date().toISOString(),
       src: "富聯網"
     });
   }
@@ -224,9 +231,13 @@ async function fetchMoneyLink() {
   return items;
 }
 
-// ── 工商時報爬蟲 ───────────────────────────────
+// ── 工商時報爬蟲（補 Referer + 完整 headers）─
 async function fetchCtee() {
-  const html = await fetchHtml("https://www.ctee.com.tw/stock/twmarket");
+  const html = await fetchHtml("https://www.ctee.com.tw/stock/twmarket", {
+    "Referer": "https://www.ctee.com.tw/",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+  });
   if (!html) return [];
 
   const items = [];
