@@ -240,58 +240,25 @@ async function fetchMoneyLink() {
   return items;
 }
 
-// ── 工商時報爬蟲（補 Referer + 完整 headers）─
-async function fetchCtee() {
-  const html = await fetchHtml("https://www.ctee.com.tw/stock/twmarket", {
-    "Referer": "https://www.ctee.com.tw/",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache"
-  });
-  if (!html) return [];
+// ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
 
-  const items = [];
-  // 工商時報文章 URL: /news/{YYYYMMDD}{ID}-{section}
-  const linkRe = /<a[^>]+href="(\/news\/\d{8}\d+-\d+)"[^>]*>\s*([\s\S]*?)<\/a>/gi;
-  let m;
-  const seen = new Set();
-  while ((m = linkRe.exec(html)) !== null) {
-    const href = m[1].trim();
-    // 標題裡可能有 img、span 等 HTML，把 tag 去掉
-    let text = m[2].replace(/<[^>]+>/g, "").trim();
-    if (!text || seen.has(href)) continue;
-    seen.add(href);
-
-    if (!isHotSectorTitle(text)) continue;
-
-    items.push({
-      title: text,
-      link: `https://www.ctee.com.tw${href}`,
-      pub: new Date().toISOString(),
-      src: "工商時報"
-    });
-  }
-  console.log(`工商時報：抓到 ${items.length} 則《熱門族群》`);
-  return items;
-}
-
-// ── 熱門族群：3 源並聯 → 比對新舊 → 有新才寫 KV ──
+// ── 熱門族群：2 源並聯 → 比對新舊 → 有新才寫 KV ──
 async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
   try {
-    // 3 源並聯抓取
-    const [rssRaw, moneyLinkItems, cteeItems] = await Promise.all([
+    // 2 源並聯抓取
+    const [rssRaw, moneyLinkItems] = await Promise.all([
       fetchGoogleRSS("富聯網 熱門族群"),
       fetchMoneyLink().catch(e => { console.log("富聯網 error:", e.message); return []; }),
-      fetchCtee().catch(e => { console.log("工商時報 error:", e.message); return []; }),
     ]);
 
     // Google RSS 也只留標題開頭「《熱門族群》」的
     const rssItems = parseRSS(rssRaw).filter(it => isHotSectorTitle(it.title));
     console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》`);
 
-    // 合併三源，依標題去重
-    const allItems = [...rssItems, ...moneyLinkItems, ...cteeItems];
+    // 合併兩源，依標題去重
+    const allItems = [...rssItems, ...moneyLinkItems];
     const newItems = uniqueNews(allItems);
 
     if (!newItems.length) {
