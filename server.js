@@ -197,22 +197,18 @@ function isHotSectorTitle(title) {
   return title.trim().startsWith("《熱門族群》");
 }
 
-// ── 富聯網爬蟲：抓首頁（首頁的「頭條」區塊有《熱門族群》）──
-// NType=1002（台股新聞）裡沒有《熱門族群》分類稿，要抓首頁或其他分類
+// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002)──
+// 這個分類有 277 筆歷史新聞，含《熱門族群》系列稿
+// 注意：URL 是 NType=0002（不是 1002，1002 是即時新聞，沒《熱門族群》）
 async function fetchMoneyLink() {
-  // 抓首頁，首頁有多個分類，《熱門族群》系列會在「頭條」「即時」區塊
-  const html = await fetchHtml("https://ww2.money-link.com.tw/", {
-    "Referer": "https://www.google.com/"
+  const html = await fetchHtml("https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002", {
+    "Referer": "https://ww2.money-link.com.tw/"
   });
   if (!html) return [];
 
   // DEBUG: 確認頁面有沒有「熱門族群」字串
   const matches = html.match(/熱門族群/g);
   console.log(`富聯網 DEBUG: HTML 長度=${html.length}, 「熱門族群」出現 ${matches ? matches.length : 0} 次`);
-  if (matches && matches.length > 0) {
-    const idx = html.indexOf("熱門族群");
-    console.log(`富聯網 DEBUG 上下文: ${html.substring(Math.max(0, idx-200), idx+250).replace(/\s+/g, ' ')}`);
-  }
 
   const items = [];
   // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
@@ -242,22 +238,23 @@ async function fetchMoneyLink() {
 
 // ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
 
-// ── 熱門族群：2 源並聯 → 比對新舊 → 有新才寫 KV ──
+// ── 熱門族群：2 個爬蟲源 + 2 組 Google RSS → 比對新舊 → 有新才寫 KV ──
 async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
   try {
-    // 2 源並聯抓取
-    const [rssRaw, moneyLinkItems] = await Promise.all([
+    // 並聯抓取：富聯網 + Google RSS 兩組關鍵字
+    const [rss1, rss2, moneyLinkItems] = await Promise.all([
       fetchGoogleRSS("富聯網 熱門族群"),
+      fetchGoogleRSS("熱門族群"),
       fetchMoneyLink().catch(e => { console.log("富聯網 error:", e.message); return []; }),
     ]);
 
-    // Google RSS 也只留標題開頭「《熱門族群》」的
-    const rssItems = parseRSS(rssRaw).filter(it => isHotSectorTitle(it.title));
-    console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》`);
+    // Google RSS 兩組合併，只留標題開頭「《熱門族群》」的
+    const rssItems = [...parseRSS(rss1), ...parseRSS(rss2)].filter(it => isHotSectorTitle(it.title));
+    console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》（兩組關鍵字合計）`);
 
-    // 合併兩源，依標題去重
+    // 合併，依標題去重
     const allItems = [...rssItems, ...moneyLinkItems];
     const newItems = uniqueNews(allItems);
 
