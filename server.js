@@ -161,16 +161,118 @@ function mergeNews(newItems, oldItems, keepDays) {
   return merged.sort((a, b) => new Date(b.pub) - new Date(a.pub));
 }
 
-// ── 熱門族群：抓 RSS → 比對新舊 → 有新才寫 KV ──
+// ── 通用 HTML fetch（帶瀏覽器 User-Agent 避免 403）─
+const BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+async function fetchHtml(url) {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+      }
+    });
+    if (!res.ok) {
+      console.log(`fetchHtml ${url} status: ${res.status}`);
+      return "";
+    }
+    return await res.text();
+  } catch (e) {
+    console.log(`fetchHtml ${url} error:`, e.message);
+    return "";
+  }
+}
+
+// 過濾條件：標題開頭含「《熱門族群》」
+function isHotSectorTitle(title) {
+  if (!title) return false;
+  return title.trim().startsWith("《熱門族群》");
+}
+
+// ── 富聯網爬蟲：抓首頁，找標題 ──────────────────
+// 首頁 URL 含「《熱門族群》」的標題會在即時新聞列表
+async function fetchMoneyLink() {
+  const html = await fetchHtml("https://ww2.money-link.com.tw/");
+  if (!html) return [];
+
+  const items = [];
+  // 富聯網即時新聞格式：<a href="/RealtimeNews/NewsContent.aspx?SN=xxx&PU=xxx">時間《標題》...</a>
+  // 用通用 a 標籤抓
+  const linkRe = /<a[^>]+href="([^"]*RealtimeNews\/NewsContent\.aspx[^"]*)"[^>]*>([^<]+)<\/a>/gi;
+  let m;
+  const seen = new Set();
+  while ((m = linkRe.exec(html)) !== null) {
+    let href = m[1].trim();
+    let text = m[2].trim();
+    if (!text || seen.has(href)) continue;
+    seen.add(href);
+
+    // 標題前可能有時間 "09:58《熱門族群》..."，去掉前面時間
+    const cleaned = text.replace(/^\d{1,2}:\d{2}\s*/, "").trim();
+    if (!isHotSectorTitle(cleaned)) continue;
+
+    const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw${href.startsWith("/") ? "" : "/"}${href}`;
+    items.push({
+      title: cleaned,
+      link,
+      pub: new Date().toISOString(), // 首頁列表沒精確時間，用現在
+      src: "富聯網"
+    });
+  }
+  console.log(`富聯網：抓到 ${items.length} 則《熱門族群》`);
+  return items;
+}
+
+// ── 工商時報爬蟲 ───────────────────────────────
+async function fetchCtee() {
+  const html = await fetchHtml("https://www.ctee.com.tw/stock/twmarket");
+  if (!html) return [];
+
+  const items = [];
+  // 工商時報文章 URL: /news/{YYYYMMDD}{ID}-{section}
+  const linkRe = /<a[^>]+href="(\/news\/\d{8}\d+-\d+)"[^>]*>\s*([\s\S]*?)<\/a>/gi;
+  let m;
+  const seen = new Set();
+  while ((m = linkRe.exec(html)) !== null) {
+    const href = m[1].trim();
+    // 標題裡可能有 img、span 等 HTML，把 tag 去掉
+    let text = m[2].replace(/<[^>]+>/g, "").trim();
+    if (!text || seen.has(href)) continue;
+    seen.add(href);
+
+    if (!isHotSectorTitle(text)) continue;
+
+    items.push({
+      title: text,
+      link: `https://www.ctee.com.tw${href}`,
+      pub: new Date().toISOString(),
+      src: "工商時報"
+    });
+  }
+  console.log(`工商時報：抓到 ${items.length} 則《熱門族群》`);
+  return items;
+}
+
+// ── 熱門族群：3 源並聯 → 比對新舊 → 有新才寫 KV ──
 async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
   try {
-    const [rss1, rss2] = await Promise.all([
+    // 3 源並聯抓取
+    const [rssRaw, moneyLinkItems, cteeItems] = await Promise.all([
       fetchGoogleRSS("富聯網 熱門族群"),
-      fetchGoogleRSS("《熱門族群》"),
+      fetchMoneyLink().catch(e => { console.log("富聯網 error:", e.message); return []; }),
+      fetchCtee().catch(e => { console.log("工商時報 error:", e.message); return []; }),
     ]);
-    const newItems = uniqueNews([...parseRSS(rss1), ...parseRSS(rss2)]);
+
+    // Google RSS 也只留標題開頭「《熱門族群》」的
+    const rssItems = parseRSS(rssRaw).filter(it => isHotSectorTitle(it.title));
+    console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》`);
+
+    // 合併三源，依標題去重
+    const allItems = [...rssItems, ...moneyLinkItems, ...cteeItems];
+    const newItems = uniqueNews(allItems);
 
     if (!newItems.length) {
       console.log("熱門族群：無新聞");
