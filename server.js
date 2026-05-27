@@ -197,11 +197,12 @@ function isHotSectorTitle(title) {
   return title.trim().startsWith("《熱門族群》");
 }
 
-// ── 富聯網爬蟲：抓「台股新聞列表」(NType=1002)，再過濾《熱門族群》──
-// 首頁只顯示少量，列表頁有完整 50+ 則
+// ── 富聯網爬蟲：抓首頁（首頁的「頭條」區塊有《熱門族群》）──
+// NType=1002（台股新聞）裡沒有《熱門族群》分類稿，要抓首頁或其他分類
 async function fetchMoneyLink() {
-  const html = await fetchHtml("https://ww2.money-link.com.tw/RealtimeNews/Index.aspx?NType=1002", {
-    "Referer": "https://ww2.money-link.com.tw/"
+  // 抓首頁，首頁有多個分類，《熱門族群》系列會在「頭條」「即時」區塊
+  const html = await fetchHtml("https://ww2.money-link.com.tw/", {
+    "Referer": "https://www.google.com/"
   });
   if (!html) return [];
 
@@ -210,12 +211,12 @@ async function fetchMoneyLink() {
   console.log(`富聯網 DEBUG: HTML 長度=${html.length}, 「熱門族群」出現 ${matches ? matches.length : 0} 次`);
   if (matches && matches.length > 0) {
     const idx = html.indexOf("熱門族群");
-    console.log(`富聯網 DEBUG 上下文: ${html.substring(Math.max(0, idx-150), idx+200).replace(/\s+/g, ' ')}`);
+    console.log(`富聯網 DEBUG 上下文: ${html.substring(Math.max(0, idx-200), idx+250).replace(/\s+/g, ' ')}`);
   }
 
   const items = [];
   // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
-  // 用 title 屬性抓更完整標題（顯示文字可能被截斷）
+  // 大小寫不分（SN/sn、PU/pu）
   const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*title="([^"]+)"[^>]*>/gi;
   let m;
   const seen = new Set();
