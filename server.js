@@ -206,9 +206,16 @@ async function fetchMoneyLink() {
   });
   if (!html) return [];
 
-  // DEBUG: 確認頁面有沒有「熱門族群」字串
+  // DEBUG: 確認頁面內容
   const matches = html.match(/熱門族群/g);
-  console.log(`富聯網 DEBUG: HTML 長度=${html.length}, 「熱門族群」出現 ${matches ? matches.length : 0} 次`);
+  const titleMatches = html.match(/title="[^"]+"/g);
+  const linkMatches = html.match(/NewsContent\.aspx/gi);
+  console.log(`富聯網 DEBUG: HTML長度=${html.length}, 「熱門族群」=${matches ? matches.length : 0}次, title屬性=${titleMatches ? titleMatches.length : 0}個, NewsContent連結=${linkMatches ? linkMatches.length : 0}個`);
+  
+  // 印出 HTML 前 800 字看實際內容
+  if (html.length > 100) {
+    console.log(`富聯網 DEBUG HTML 開頭: ${html.substring(0, 800).replace(/\s+/g, ' ')}`);
+  }
 
   const items = [];
   // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
