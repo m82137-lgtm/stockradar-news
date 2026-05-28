@@ -203,8 +203,8 @@ function isHotSectorTitle(title) {
 async function fetchMoneyLink() {
   const items = [];
   const seen = new Set();
-  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*title="([^"]+)"[^>]*>/gi;
-
+  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*>\s*<h3>([^<]+)<\/h3>/gi;
+  
   let totalHotCount = 0;
 
   for (let page = 1; page <= 10; page++) {
