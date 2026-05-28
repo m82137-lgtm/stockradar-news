@@ -217,8 +217,15 @@ async function fetchMoneyLink() {
     });
     if (!html) continue;
 
+
+
+
     const matches = html.match(/熱門族群/g);
-    if (matches) totalHotCount += matches.length;
+    if (matches) {
+      totalHotCount += matches.length;
+      const idx = html.indexOf("熱門族群");
+      console.log(`富聯網 P${page} 熱門族群上下文: ${html.substring(Math.max(0,idx-250), idx+100).replace(/\s+/g,' ')}`);
+    }
 
     let m;
     linkRe.lastIndex = 0;
