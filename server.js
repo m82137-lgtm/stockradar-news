@@ -197,51 +197,56 @@ function isHotSectorTitle(title) {
   return title.trim().startsWith("《熱門族群》");
 }
 
-// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002)──
-// 這個分類有 277 筆歷史新聞，含《熱門族群》系列稿
-// 注意：URL 是 NType=0002（不是 1002，1002 是即時新聞，沒《熱門族群》）
+// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002) 前 10 頁 ──
+// 翻頁參數 PGNum，第 1 頁無參數，第 2~10 頁加 &PGNum=N
+// 《熱門族群》發布後會被其他新聞往後擠，抓 10 頁(約200則)降低漏接
 async function fetchMoneyLink() {
-  const html = await fetchHtml("https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002", {
-    "Referer": "https://ww2.money-link.com.tw/"
-  });
-  if (!html) return [];
-
-  // DEBUG: 確認頁面內容
-  const matches = html.match(/熱門族群/g);
-  const titleMatches = html.match(/title="[^"]+"/g);
-  const linkMatches = html.match(/NewsContent\.aspx/gi);
-  console.log(`富聯網 DEBUG: HTML長度=${html.length}, 「熱門族群」=${matches ? matches.length : 0}次, title屬性=${titleMatches ? titleMatches.length : 0}個, NewsContent連結=${linkMatches ? linkMatches.length : 0}個`);
-  
-  // 印出 HTML 前 800 字看實際內容
-  if (html.length > 100) {
-    console.log(`富聯網 DEBUG HTML 開頭: ${html.substring(0, 800).replace(/\s+/g, ' ')}`);
-  }
-
   const items = [];
-  // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
-  // 大小寫不分（SN/sn、PU/pu）
-  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*title="([^"]+)"[^>]*>/gi;
-  let m;
   const seen = new Set();
-  while ((m = linkRe.exec(html)) !== null) {
-    let href = m[1].trim();
-    let title = m[2].trim();
-    if (!title || seen.has(href)) continue;
-    seen.add(href);
+  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*title="([^"]+)"[^>]*>/gi;
 
-    if (!isHotSectorTitle(title)) continue;
+  let totalHotCount = 0;
 
-    const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw${href.startsWith("/") ? "" : "/"}${href}`;
-    items.push({
-      title,
-      link,
-      pub: new Date().toISOString(),
-      src: "富聯網"
+  for (let page = 1; page <= 10; page++) {
+    const url = page === 1
+      ? "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002"
+      : `https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002&PGNum=${page}`;
+
+    const html = await fetchHtml(url, {
+      "Referer": "https://ww2.money-link.com.tw/"
     });
+    if (!html) continue;
+
+    const matches = html.match(/熱門族群/g);
+    if (matches) totalHotCount += matches.length;
+
+    let m;
+    linkRe.lastIndex = 0;
+    while ((m = linkRe.exec(html)) !== null) {
+      let href = m[1].trim();
+      let title = m[2].trim();
+      if (!title || seen.has(href)) continue;
+      seen.add(href);
+      if (!isHotSectorTitle(title)) continue;
+
+      const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw${href.startsWith("/") ? "" : "/"}${href}`;
+      items.push({
+        title,
+        link,
+        pub: new Date().toISOString(),
+        src: "富聯網"
+      });
+    }
+
+    // 頁與頁之間小延遲，避免被限流
+    await new Promise(r => setTimeout(r, 200));
   }
-  console.log(`富聯網：抓到 ${items.length} 則《熱門族群》`);
+
+  console.log(`富聯網：10頁共「熱門族群」字串 ${totalHotCount} 次，抓到 ${items.length} 則《熱門族群》`);
   return items;
 }
+
+
 
 // ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
 
