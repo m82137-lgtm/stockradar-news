@@ -231,7 +231,7 @@ async function fetchMoneyLink() {
       seen.add(href);
       if (!isHotSectorTitle(title)) continue;
 
-      const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw${href.startsWith("/") ? "" : "/"}${href}`;
+      const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw/realtimenews/${href}`;
       items.push({
         title,
         link,
