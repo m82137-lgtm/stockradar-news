@@ -197,51 +197,58 @@ function isHotSectorTitle(title) {
   return title.trim().startsWith("《熱門族群》");
 }
 
-// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002)──
-// 這個分類有 277 筆歷史新聞，含《熱門族群》系列稿
-// 注意：URL 是 NType=0002（不是 1002，1002 是即時新聞，沒《熱門族群》）
+// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002) 前 10 頁 ──
+// 翻頁參數 PGNum，第 1 頁無參數，第 2~10 頁加 &PGNum=N
+// 《熱門族群》發布後會被其他新聞往後擠，抓 10 頁(約200則)降低漏接
 async function fetchMoneyLink() {
-  const html = await fetchHtml("https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002", {
-    "Referer": "https://ww2.money-link.com.tw/"
-  });
-  if (!html) return [];
-
-  // DEBUG: 確認頁面內容
-  const matches = html.match(/熱門族群/g);
-  const titleMatches = html.match(/title="[^"]+"/g);
-  const linkMatches = html.match(/NewsContent\.aspx/gi);
-  console.log(`富聯網 DEBUG: HTML長度=${html.length}, 「熱門族群」=${matches ? matches.length : 0}次, title屬性=${titleMatches ? titleMatches.length : 0}個, NewsContent連結=${linkMatches ? linkMatches.length : 0}個`);
-  
-  // 印出 HTML 前 800 字看實際內容
-  if (html.length > 100) {
-    console.log(`富聯網 DEBUG HTML 開頭: ${html.substring(0, 800).replace(/\s+/g, ' ')}`);
-  }
-
   const items = [];
-  // 富聯網連結格式：<a href="...NewsContent.aspx?sn=xxx&pu=xxx" title="完整標題">標題文字</a>
-  // 大小寫不分（SN/sn、PU/pu）
-  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*title="([^"]+)"[^>]*>/gi;
-  let m;
   const seen = new Set();
-  while ((m = linkRe.exec(html)) !== null) {
-    let href = m[1].trim();
-    let title = m[2].trim();
-    if (!title || seen.has(href)) continue;
-    seen.add(href);
+  const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*>\s*<h3>([^<]+)<\/h3>/gi;
+  
+  let totalHotCount = 0;
 
-    if (!isHotSectorTitle(title)) continue;
+  for (let page = 1; page <= 10; page++) {
+    const url = page === 1
+      ? "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002"
+      : `https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002&PGNum=${page}`;
 
-    const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw${href.startsWith("/") ? "" : "/"}${href}`;
-    items.push({
-      title,
-      link,
-      pub: new Date().toISOString(),
-      src: "富聯網"
+    const html = await fetchHtml(url, {
+      "Referer": "https://ww2.money-link.com.tw/"
     });
+    if (!html) continue;
+
+
+    const matches = html.match(/熱門族群/g);
+    if (matches) totalHotCount += matches.length;
+
+
+    let m;
+    linkRe.lastIndex = 0;
+    while ((m = linkRe.exec(html)) !== null) {
+      let href = m[1].trim();
+      let title = m[2].trim();
+      if (!title || seen.has(href)) continue;
+      seen.add(href);
+      if (!isHotSectorTitle(title)) continue;
+
+      const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw/realtimenews/${href}`;
+      items.push({
+        title,
+        link,
+        pub: new Date().toISOString(),
+        src: "富聯網"
+      });
+    }
+
+    // 頁與頁之間小延遲，避免被限流
+    await new Promise(r => setTimeout(r, 200));
   }
-  console.log(`富聯網：抓到 ${items.length} 則《熱門族群》`);
+
+  console.log(`富聯網：10頁共「熱門族群」字串 ${totalHotCount} 次，抓到 ${items.length} 則《熱門族群》`);
   return items;
 }
+
+
 
 // ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
 
@@ -289,6 +296,53 @@ async function updateSectorNews() {
   } catch (e) {
     console.error("updateSectorNews error:", e.message);
   }
+}
+
+// ── 上櫃每日收盤行情代打：Worker 打不到櫃買(Cloudflare 擋 Worker)，改由 Render 代打 ──
+// 來源：櫃買 OpenAPI「上櫃股票每日收盤行情(不含定價)」，一次回全部上櫃股
+// 回傳正規化後的清單：code / name / close / chgPct / vol(張) / tradeValue(元)
+async function fetchOtcDaily() {
+  const TPEX = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes";
+  const r = await fetch(TPEX, {
+    headers: {
+      "User-Agent": BROWSER_UA,
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+      "Referer": "https://www.tpex.org.tw/zh-tw/index.html",
+    },
+  });
+  const status = r.status;
+  const text = await r.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
+  if (!Array.isArray(json)) {
+    return { ok: false, status, head: text.slice(0, 200), data: [] };
+  }
+  const num = (s) => {
+    const n = parseFloat(String(s == null ? "" : s).replace(/,/g, "").trim());
+    return isNaN(n) ? 0 : n;
+  };
+  const data = [];
+  for (const row of json) {
+    const code = String(row.SecuritiesCompanyCode || "").trim();
+    if (!/^\d{4}$/.test(code)) continue;
+    const close = num(row.Close);
+    const change = num(row.Change);
+    const tradeValue = num(row.TransactionAmount);
+    const volume = num(row.TradingShares);
+    if (close <= 0 || tradeValue <= 0) continue;
+    const prevClose = close - change;
+    const chgPct = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
+    data.push({
+      code,
+      name: String(row.CompanyName || "").trim(),
+      close,
+      chgPct,
+      vol: Math.round(volume / 1000),
+      tradeValue,
+    });
+  }
+  return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
 }
 
 // 盤中：UTC 01:00~06:59（台灣時間 09:00~14:59）週一~五每5分鐘
@@ -356,6 +410,22 @@ app.get("/api/sectors", async (req, res) => {
     }]);
   } catch (e) {
     res.json([{ time: now(), keyword: "富聯網 熱門族群", items: [] }]);
+  }
+});
+
+// 上櫃每日收盤行情代打：Worker 的 buildDailyData 會打這支拿 OTC 資料
+app.get("/api/otc-daily", async (req, res) => {
+  try {
+    const result = await fetchOtcDaily();
+    if (!result.ok) {
+      console.log(`/api/otc-daily 失敗 status=${result.status} head=${result.head}`);
+      return res.status(502).json(result);
+    }
+    console.log(`/api/otc-daily 成功 date=${result.date} count=${result.count}`);
+    res.json(result);
+  } catch (e) {
+    console.error("/api/otc-daily error:", e.message);
+    res.status(500).json({ ok: false, error: e.message, data: [] });
   }
 });
 
