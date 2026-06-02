@@ -200,11 +200,22 @@ function isHotSectorTitle(title) {
 // ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002) 前 10 頁 ──
 // 翻頁參數 PGNum，第 1 頁無參數，第 2~10 頁加 &PGNum=N
 // 《熱門族群》發布後會被其他新聞往後擠，抓 10 頁(約200則)降低漏接
+// 富聯網列表頁時間格式：「來源 2026/06/02 17:43」，是台灣時間。
+// 解析成帶 +08:00 的 ISO（存成 UTC），讓前端 new Date() 顯示正確時間。
+function moneyLinkDateToIso(seg) {
+  // 日期與時間之間可能是空白/&nbsp;/標籤，用「1~10 個非數字字元」容錯
+  const dm = seg.match(/(\d{4})\/(\d{2})\/(\d{2})[^\d]{1,10}(\d{2}):(\d{2})/);
+  if (!dm) return new Date().toISOString();
+  const iso = `${dm[1]}-${dm[2]}-${dm[3]}T${dm[4]}:${dm[5]}:00+08:00`;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
 async function fetchMoneyLink() {
   const items = [];
   const seen = new Set();
   const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*>\s*<h3>([^<]+)<\/h3>/gi;
-  
+
   let totalHotCount = 0;
 
   for (let page = 1; page <= 10; page++) {
@@ -217,27 +228,29 @@ async function fetchMoneyLink() {
     });
     if (!html) continue;
 
+    const hot = html.match(/熱門族群/g);
+    if (hot) totalHotCount += hot.length;
 
-    const matches = html.match(/熱門族群/g);
-    if (matches) totalHotCount += matches.length;
-
-
+    // 先收集本頁所有「標題項目」的位置，之後在每則與下一則之間那段 HTML 找發布時間
+    const found = [];
     let m;
     linkRe.lastIndex = 0;
     while ((m = linkRe.exec(html)) !== null) {
-      let href = m[1].trim();
-      let title = m[2].trim();
+      found.push({ href: m[1].trim(), title: m[2].trim(), end: linkRe.lastIndex });
+    }
+
+    for (let i = 0; i < found.length; i++) {
+      const { href, title, end } = found[i];
       if (!title || seen.has(href)) continue;
       seen.add(href);
       if (!isHotSectorTitle(title)) continue;
 
+      // 本則標題之後、下一則標題之前的那段，含「來源 + 發布日期時間」
+      const sliceEnd = (i + 1 < found.length) ? found[i + 1].end : html.length;
+      const pub = moneyLinkDateToIso(html.slice(end, sliceEnd));
+
       const link = href.startsWith("http") ? href : `https://ww2.money-link.com.tw/realtimenews/${href}`;
-      items.push({
-        title,
-        link,
-        pub: new Date().toISOString(),
-        src: "富聯網"
-      });
+      items.push({ title, link, pub, src: "富聯網" });
     }
 
     // 頁與頁之間小延遲，避免被限流
