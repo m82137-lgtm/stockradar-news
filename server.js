@@ -280,15 +280,32 @@ async function fetchNewsStocks(link) {
       .replace(/\s+/g, " ")
       .trim();
 
-    // 抓「名稱(股號4碼)」，名稱取緊貼括號前 2~6 字，再用 stocks Map 去重
+    // 抓「名稱(股號4碼)」，名稱取緊貼括號前的字，再清掉開頭贅字
     const re = /([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9*\-]{1,9})\((\d{4})\)/g;
+    // 常見黏在股名前的連接詞/贅字（由長到短，逐一從開頭剝除）
+    const JUNK = ["帶領", "攜手", "包括", "以及", "其中", "像是", "例如", "還有", "及", "和", "與", "的", "股", "在", "讓", "B股", "A股"];
+    const cleanName = (raw) => {
+      let s = raw.trim();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const j of JUNK) {
+          if (s.length > j.length && s.startsWith(j)) {
+            s = s.slice(j.length);
+            changed = true;
+            break;
+          }
+        }
+      }
+      // 仍過長(>5字)就取後 4 字
+      if (s.length > 5) s = s.slice(-4);
+      return s;
+    };
     const map = new Map();   // code -> name
     let m;
     while ((m = re.exec(bodyText)) !== null) {
       const code = m[2];
-      // 名稱只取最後 2~5 字(避免「帶領順達」這種把動詞吃進去)
-      let name = m[1];
-      if (name.length > 5) name = name.slice(-4);
+      const name = cleanName(m[1]);
       if (!map.has(code)) map.set(code, name);
     }
 
@@ -492,9 +509,10 @@ app.get("/api/otc-daily", async (req, res) => {
   }
 });
 
-// 手動補抓：對 KV 現有的富聯網新聞補 stocks(沒抓過的才抓)，方便立即測試
+// 手動補抓：對 KV 現有的富聯網新聞補 stocks。?force=1 強制重抓(覆蓋舊的，用於改了解析邏輯後刷新)
 app.get("/api/backfill-stocks", async (req, res) => {
   try {
+    const force = req.query.force === "1";
     const data = await kvGet('sectors');
     const items = Array.isArray(data) ? data : [];
     let fetched = 0, skipped = 0, googleSkip = 0;
@@ -502,7 +520,7 @@ app.get("/api/backfill-stocks", async (req, res) => {
     for (const item of items) {
       const isMoneyLink = item.link && item.link.includes("NewsContent.aspx");
       if (!isMoneyLink) { googleSkip++; continue; }
-      if (Array.isArray(item.stocks)) { skipped++; continue; }
+      if (!force && Array.isArray(item.stocks)) { skipped++; continue; }
       item.stocks = await fetchNewsStocks(item.link);
       fetched++;
       await new Promise(r => setTimeout(r, 150));
@@ -514,14 +532,49 @@ app.get("/api/backfill-stocks", async (req, res) => {
 
     res.json({
       ok: true,
+      force,
       total: items.length,
       moneylink_fetched: fetched,
       moneylink_already: skipped,
       google_skipped: googleSkip,
       sample: items.filter(it => Array.isArray(it.stocks) && it.stocks.length)
-                   .slice(0, 5)
+                   .slice(0, 6)
                    .map(it => ({ title: it.title.slice(0, 30), stocks: it.stocks })),
     });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 臨時測試：MIS 即時報價擋不擋 Render(查華城1519等，看 z現價/u漲停價)
+app.get("/api/test-mis", async (req, res) => {
+  try {
+    const codes = (req.query.codes || "1519,2330,5274").split(",").map(s => s.trim()).filter(Boolean);
+    // 預設都用 tse_，上櫃要 otc_(這裡先全試 tse_，之後正式版會判斷市場)
+    const exch = codes.map(c => `tse_${c}.tw`).join("|");
+    const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${exch}&json=1&delay=0&_=${Date.now()}`;
+    const r = await fetch(url, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://mis.twse.com.tw/stock/index.jsp",
+      },
+    });
+    const status = r.status;
+    const text = await r.text();
+    const blocked = /安全性考量|FOR SECURITY REASONS|<html/i.test(text);
+    if (blocked) {
+      return res.json({ ok: false, blocked: true, status, head: text.slice(0, 200) });
+    }
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    const arr = json?.msgArray || [];
+    const parsed = arr.map(s => ({
+      code: s.c, name: s.n,
+      price: s.z, high: s.h, limitUp: s.u, prevClose: s.y,
+      isLimitUp: s.z !== "-" && s.u !== "-" && parseFloat(s.z) >= parseFloat(s.u),
+    }));
+    res.json({ ok: true, status, rtcode: json?.rtcode, count: arr.length, parsed, head: text.slice(0, 150) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
