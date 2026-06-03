@@ -358,51 +358,52 @@ async function fetchOtcDaily() {
   return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
 }
 
-// ── 上市每日收盤行情代打：Worker 打不到 TWSE(Cloudflare 海外 IP 被擋)，改由 Render 代打 ──
-// 來源：證交所 OpenAPI「上市個股日成交資訊」STOCK_DAY_ALL（官方開放API，不擋機房IP，比照櫃買做法）
-// 回傳正規化後的清單：code / name / close / chgPct / vol(張) / tradeValue(元)，格式與 OTC 一致
+// ── 上市每日收盤行情代打：測試 data.gov.tw 指向的 CSV 端點(response=open_data) ──
+// 來源：證交所 STOCK_DAY_ALL CSV 版。先探測機房 IP 擋不擋；不擋再做完整 CSV 解析。
+// CSV 欄位順序：日期,證券代號,證券名稱,成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數
 async function fetchTseDaily() {
-  const TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
+  const TWSE = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
   const r = await fetch(TWSE, {
     headers: {
       "User-Agent": BROWSER_UA,
-      "Accept": "application/json, text/plain, */*",
+      "Accept": "text/csv,text/plain,*/*",
       "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
     },
   });
   const status = r.status;
   const text = await r.text();
-  let json = null;
-  try { json = JSON.parse(text); } catch {}
-  if (!Array.isArray(json)) {
-    return { ok: false, status, head: text.slice(0, 200), data: [] };
+
+  // 探測：若回到 TWSE 的擋頁(含「安全性考量」或 HTML)，直接回失敗讓我們判斷
+  const looksBlocked = /安全性考量|FOR SECURITY REASONS|<html/i.test(text);
+  if (looksBlocked) {
+    return { ok: false, status, blocked: true, head: text.slice(0, 200), data: [] };
   }
+
   const num = (s) => {
-    const n = parseFloat(String(s == null ? "" : s).replace(/,/g, "").replace(/\+/g, "").trim());
+    const n = parseFloat(String(s == null ? "" : s).replace(/,/g, "").replace(/\+/g, "").replace(/"/g, "").trim());
     return isNaN(n) ? 0 : n;
   };
+  // 解析 CSV：逐行、用逗號切（欄位有引號包住數字含逗號，需處理）
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
   const data = [];
-  for (const row of json) {
-    const code = String(row.Code || "").trim();
-    if (!/^\d{4}$/.test(code)) continue;
-    const close = num(row.ClosingPrice);
-    const change = num(row.Change);
-    const volume = num(row.TradeVolume);
-    const tradeValue = num(row.TradeValue);
+  for (const line of lines) {
+    // 處理 "1,234" 這種含逗號的引號欄位：先抓出所有欄位
+    const cols = line.match(/("([^"]*)"|[^,]*)(,|$)/g)?.map(c => c.replace(/,$/, "").replace(/^"|"$/g, "").trim()) || [];
+    const code = String(cols[0] || "").trim();
+    if (!/^\d{4}$/.test(code)) continue;   // 跳過表頭與非個股
+    const name = String(cols[1] || "").trim();
+    const volume = num(cols[2]);       // 成交股數
+    const tradeValue = num(cols[3]);   // 成交金額
+    const close = num(cols[7]);        // 收盤價
+    const change = num(cols[8]);       // 漲跌價差
     if (close <= 0 || tradeValue <= 0) continue;
     const prevClose = close - change;
     const chgPct = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
-    data.push({
-      code,
-      name: String(row.Name || "").trim(),
-      close,
-      chgPct,
-      vol: Math.round(volume / 1000),
-      tradeValue,
-    });
+    data.push({ code, name, close, chgPct, vol: Math.round(volume / 1000), tradeValue });
   }
-  return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
+  return { ok: data.length > 0, status, count: data.length, sample_head: text.slice(0, 150), data };
 }
+
 
 
 
