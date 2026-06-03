@@ -261,6 +261,44 @@ async function fetchMoneyLink() {
   return items;
 }
 
+// ── 抓單則富聯網新聞內文，解析出內文點名的個股股號(4碼) ──
+// 只回股號陣列(去重、最多 12 檔)；股名交給前端用內文正則名稱顯示。
+// 僅對富聯網來源(link 含 NewsContent.aspx)有效，Google RSS 轉址 link 無法抓。
+async function fetchNewsStocks(link) {
+  if (!link || !link.includes("NewsContent.aspx")) return [];
+  try {
+    const html = await fetchHtml(link, {
+      "Referer": "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002",
+    });
+    if (!html) return [];
+
+    const bodyText = html
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // 抓「名稱(股號4碼)」，名稱取緊貼括號前 2~6 字，再用 stocks Map 去重
+    const re = /([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9*\-]{1,9})\((\d{4})\)/g;
+    const map = new Map();   // code -> name
+    let m;
+    while ((m = re.exec(bodyText)) !== null) {
+      const code = m[2];
+      // 名稱只取最後 2~5 字(避免「帶領順達」這種把動詞吃進去)
+      let name = m[1];
+      if (name.length > 5) name = name.slice(-4);
+      if (!map.has(code)) map.set(code, name);
+    }
+
+    return [...map.entries()].slice(0, 12).map(([code, name]) => ({ code, name }));
+  } catch (e) {
+    console.log("fetchNewsStocks error:", e.message);
+    return [];
+  }
+}
+
 
 
 // ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
@@ -281,8 +319,8 @@ async function updateSectorNews() {
     const rssItems = [...parseRSS(rss1), ...parseRSS(rss2)].filter(it => isHotSectorTitle(it.title));
     console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》（兩組關鍵字合計）`);
 
-    // 合併，依標題去重
-    const allItems = [...rssItems, ...moneyLinkItems];
+    // 合併，依標題去重。富聯網排前面 → 同標題時保留富聯網版本(有真內頁 link，能抓內文)
+    const allItems = [...moneyLinkItems, ...rssItems];
     const newItems = uniqueNews(allItems);
 
     if (!newItems.length) {
@@ -301,6 +339,18 @@ async function updateSectorNews() {
 
     // 合併保留 15 天
     const merged = mergeNews(newItems, oldItems, HOT_SECTOR_KEEP_DAYS);
+
+    // ── 對「富聯網來源、且還沒抓過 stocks」的新聞補抓內文、解析個股(方案A：只抓新的，零浪費) ──
+    let stockFetched = 0;
+    for (const item of merged) {
+      const isMoneyLink = item.link && item.link.includes("NewsContent.aspx");
+      if (!isMoneyLink) continue;          // Google RSS 轉址抓不到內頁，跳過
+      if (Array.isArray(item.stocks)) continue;  // 已抓過(含抓到空陣列)，不重抓
+      item.stocks = await fetchNewsStocks(item.link);
+      stockFetched++;
+      await new Promise(r => setTimeout(r, 150));  // 內頁之間小延遲，避免限流
+    }
+    if (stockFetched) console.log(`族群個股：本次補抓 ${stockFetched} 則內文`);
 
     // 寫入 KV，TTL 16 天
     const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 16);
@@ -439,64 +489,6 @@ app.get("/api/otc-daily", async (req, res) => {
   } catch (e) {
     console.error("/api/otc-daily error:", e.message);
     res.status(500).json({ ok: false, error: e.message, data: [] });
-  }
-});
-
-// ── 臨時測試：從 KV sectors 撈富聯網來源新聞，抓內文看個股格式 ──
-app.get("/api/test-newscontent", async (req, res) => {
-  try {
-    const data = await kvGet('sectors');
-    const items = Array.isArray(data) ? data : [];
-
-    // 統計來源分布
-    const moneylinkItems = items.filter(it => it.link && it.link.includes("NewsContent.aspx"));
-    const googleItems    = items.filter(it => it.link && it.link.includes("news.google"));
-
-    const diag = {
-      kv_total: items.length,
-      moneylink_count: moneylinkItems.length,
-      google_count: googleItems.length,
-      sample_links: items.slice(0, 5).map(it => ({ src: it.src, title: (it.title||"").slice(0,30), link: (it.link||"").slice(0,70) })),
-    };
-
-    if (!moneylinkItems.length) {
-      return res.json({ ok: false, step: "no-moneylink", note: "KV 裡沒有富聯網來源(NewsContent)的新聞", diag });
-    }
-
-    // 抓第一則富聯網新聞的內文
-    const target = moneylinkItems[0];
-    const pageHtml = await fetchHtml(target.link, { "Referer": "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002" });
-    if (!pageHtml) {
-      return res.json({ ok: false, step: "content", note: "內頁抓不到(空)", link: target.link, diag });
-    }
-
-    const bodyText = pageHtml
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    const stockRe = /([\u4e00-\u9fa5A-Za-z*\-]{2,10})\((\d{4})\)/g;
-    const stocks = [];
-    let sm;
-    while ((sm = stockRe.exec(bodyText)) !== null) {
-      stocks.push({ name: sm[1], code: sm[2] });
-    }
-
-    res.json({
-      ok: true,
-      diag,
-      title: target.title,
-      link: target.link,
-      pageLen: pageHtml.length,
-      bodyHead: bodyText.slice(0, 800),
-      stock_matches: stocks.slice(0, 40),
-      stock_count: stocks.length,
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
