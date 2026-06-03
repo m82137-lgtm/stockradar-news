@@ -362,7 +362,7 @@ async function fetchOtcDaily() {
 // 來源：證交所 STOCK_DAY_ALL「當日各股全部成交資訊」，一次回全部上市股
 // 回傳正規化後的清單：code / name / close / chgPct / vol(張) / tradeValue(元)，格式與 OTC 一致
 async function fetchTseDaily() {
-  const TWSE = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json";
+  const TWSE = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json";
   const r = await fetch(TWSE, {
     headers: {
       "User-Agent": BROWSER_UA,
