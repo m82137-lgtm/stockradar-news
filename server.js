@@ -359,23 +359,22 @@ async function fetchOtcDaily() {
 }
 
 // ── 上市每日收盤行情代打：Worker 打不到 TWSE(Cloudflare 海外 IP 被擋)，改由 Render 代打 ──
-// 來源：證交所 STOCK_DAY_ALL「當日各股全部成交資訊」，一次回全部上市股
+// 來源：證交所 OpenAPI「上市個股日成交資訊」STOCK_DAY_ALL（官方開放API，不擋機房IP，比照櫃買做法）
 // 回傳正規化後的清單：code / name / close / chgPct / vol(張) / tradeValue(元)，格式與 OTC 一致
 async function fetchTseDaily() {
-  const TWSE = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json";
+  const TWSE = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
   const r = await fetch(TWSE, {
     headers: {
       "User-Agent": BROWSER_UA,
       "Accept": "application/json, text/plain, */*",
       "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-      "Referer": "https://www.twse.com.tw/zh/index.html",
     },
   });
   const status = r.status;
   const text = await r.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
-  if (!json || json.stat !== "OK" || !Array.isArray(json.data)) {
+  if (!Array.isArray(json)) {
     return { ok: false, status, head: text.slice(0, 200), data: [] };
   }
   const num = (s) => {
@@ -383,27 +382,28 @@ async function fetchTseDaily() {
     return isNaN(n) ? 0 : n;
   };
   const data = [];
-  for (const row of json.data) {
-    const code = String(row[0] || "").trim();
+  for (const row of json) {
+    const code = String(row.Code || "").trim();
     if (!/^\d{4}$/.test(code)) continue;
-    const close = num(row[7]);        // 收盤價
-    const change = num(row[8]);       // 漲跌價差
-    const volume = num(row[2]);       // 成交股數
-    const tradeValue = num(row[3]);   // 成交金額
+    const close = num(row.ClosingPrice);
+    const change = num(row.Change);
+    const volume = num(row.TradeVolume);
+    const tradeValue = num(row.TradeValue);
     if (close <= 0 || tradeValue <= 0) continue;
     const prevClose = close - change;
     const chgPct = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
     data.push({
       code,
-      name: String(row[1] || "").trim(),
+      name: String(row.Name || "").trim(),
       close,
       chgPct,
       vol: Math.round(volume / 1000),
       tradeValue,
     });
   }
-  return { ok: true, status, date: json.date || null, count: data.length, data };
+  return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
 }
+
 
 
 cron.schedule("*/5 1-6 * * 1-5", async () => {
