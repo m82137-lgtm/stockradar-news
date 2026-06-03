@@ -358,55 +358,7 @@ async function fetchOtcDaily() {
   return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
 }
 
-// ── 上市每日收盤行情代打：測試 data.gov.tw 指向的 CSV 端點(response=open_data) ──
-// 來源：證交所 STOCK_DAY_ALL CSV 版。先探測機房 IP 擋不擋；不擋再做完整 CSV 解析。
-// CSV 欄位順序：日期,證券代號,證券名稱,成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數
-async function fetchTseDaily() {
-  const TWSE = "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data";
-  const r = await fetch(TWSE, {
-    headers: {
-      "User-Agent": BROWSER_UA,
-      "Accept": "text/csv,text/plain,*/*",
-      "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-    },
-  });
-  const status = r.status;
-  const text = await r.text();
-
-  // 探測：若回到 TWSE 的擋頁(含「安全性考量」或 HTML)，直接回失敗讓我們判斷
-  const looksBlocked = /安全性考量|FOR SECURITY REASONS|<html/i.test(text);
-  if (looksBlocked) {
-    return { ok: false, status, blocked: true, head: text.slice(0, 200), data: [] };
-  }
-
-  const num = (s) => {
-    const n = parseFloat(String(s == null ? "" : s).replace(/,/g, "").replace(/\+/g, "").replace(/"/g, "").trim());
-    return isNaN(n) ? 0 : n;
-  };
-  // 解析 CSV：逐行、用逗號切（欄位有引號包住數字含逗號，需處理）
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  const data = [];
-  for (const line of lines) {
-    // 處理 "1,234" 這種含逗號的引號欄位：先抓出所有欄位
-    const cols = line.match(/("([^"]*)"|[^,]*)(,|$)/g)?.map(c => c.replace(/,$/, "").replace(/^"|"$/g, "").trim()) || [];
-    const code = String(cols[0] || "").trim();
-    if (!/^\d{4}$/.test(code)) continue;   // 跳過表頭與非個股
-    const name = String(cols[1] || "").trim();
-    const volume = num(cols[2]);       // 成交股數
-    const tradeValue = num(cols[3]);   // 成交金額
-    const close = num(cols[7]);        // 收盤價
-    const change = num(cols[8]);       // 漲跌價差
-    if (close <= 0 || tradeValue <= 0) continue;
-    const prevClose = close - change;
-    const chgPct = prevClose > 0 ? +((change / prevClose) * 100).toFixed(2) : 0;
-    data.push({ code, name, close, chgPct, vol: Math.round(volume / 1000), tradeValue });
-  }
-  return { ok: data.length > 0, status, count: data.length, sample_head: text.slice(0, 150), data };
-}
-
-
-
-
+// 盤中：UTC 01:00~06:59（台灣時間 09:00~14:59）週一~五每5分鐘
 cron.schedule("*/5 1-6 * * 1-5", async () => {
   await updateSectorNews();
 });
@@ -471,22 +423,6 @@ app.get("/api/sectors", async (req, res) => {
     }]);
   } catch (e) {
     res.json([{ time: now(), keyword: "富聯網 熱門族群", items: [] }]);
-  }
-});
-
-// 上市每日收盤行情代打：Worker 的 buildDailyData 會打這支拿 TSE 資料
-app.get("/api/tse-daily", async (req, res) => {
-  try {
-    const result = await fetchTseDaily();
-    if (!result.ok) {
-      console.log(`/api/tse-daily 失敗 status=${result.status} head=${result.head}`);
-      return res.status(502).json(result);
-    }
-    console.log(`/api/tse-daily 成功 date=${result.date} count=${result.count}`);
-    res.json(result);
-  } catch (e) {
-    console.error("/api/tse-daily error:", e.message);
-    res.status(500).json({ ok: false, error: e.message, data: [] });
   }
 });
 
