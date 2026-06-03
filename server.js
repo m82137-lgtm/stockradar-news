@@ -442,6 +442,64 @@ app.get("/api/otc-daily", async (req, res) => {
   }
 });
 
+// ── 臨時測試：抓一則《熱門族群》內頁，看內文 + 個股格式 ──
+app.get("/api/test-newscontent", async (req, res) => {
+  try {
+    const listHtml = await fetchHtml(
+      "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002",
+      { "Referer": "https://ww2.money-link.com.tw/" }
+    );
+    const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*>\s*<h3>([^<]+)<\/h3>/gi;
+    let m, target = null;
+    while ((m = linkRe.exec(listHtml)) !== null) {
+      const title = m[2].trim();
+      if (title.startsWith("《熱門族群》")) {
+        const href = m[1].trim();
+        target = {
+          title,
+          link: href.startsWith("http") ? href : `https://ww2.money-link.com.tw/realtimenews/${href}`,
+        };
+        break;
+      }
+    }
+    if (!target) {
+      return res.json({ ok: false, step: "list", note: "列表頁找不到《熱門族群》", listLen: listHtml.length });
+    }
+
+    const pageHtml = await fetchHtml(target.link, { "Referer": "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002" });
+    if (!pageHtml) {
+      return res.json({ ok: false, step: "content", note: "內頁抓不到(空)", link: target.link });
+    }
+
+    const bodyText = pageHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const stockRe = /([\u4e00-\u9fa5A-Za-z*\-]{2,10})\((\d{4})\)/g;
+    const stocks = [];
+    let sm;
+    while ((sm = stockRe.exec(bodyText)) !== null) {
+      stocks.push({ name: sm[1], code: sm[2] });
+    }
+
+    res.json({
+      ok: true,
+      title: target.title,
+      link: target.link,
+      pageLen: pageHtml.length,
+      bodyHead: bodyText.slice(0, 600),
+      stock_matches: stocks.slice(0, 40),
+      stock_count: stocks.length,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
   await updateSectorNews();
