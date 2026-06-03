@@ -442,52 +442,29 @@ app.get("/api/otc-daily", async (req, res) => {
   }
 });
 
-// ── 臨時測試：抓一則《熱門族群》內頁，看內文 + 個股格式 ──
+// ── 臨時測試：從 KV sectors 撈富聯網來源新聞，抓內文看個股格式 ──
 app.get("/api/test-newscontent", async (req, res) => {
   try {
-    const listHtml = await fetchHtml(
-      "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002",
-      { "Referer": "https://ww2.money-link.com.tw/" }
-    );
+    const data = await kvGet('sectors');
+    const items = Array.isArray(data) ? data : [];
 
-    // 診斷：列表頁裡這些關鍵字各出現幾次
+    // 統計來源分布
+    const moneylinkItems = items.filter(it => it.link && it.link.includes("NewsContent.aspx"));
+    const googleItems    = items.filter(it => it.link && it.link.includes("news.google"));
+
     const diag = {
-      listLen: listHtml.length,
-      cnt_熱門族群: (listHtml.match(/熱門族群/g) || []).length,
-      cnt_熱門: (listHtml.match(/熱門/g) || []).length,
-      cnt_NewsContent: (listHtml.match(/NewsContent\.aspx/g) || []).length,
-      cnt_h3: (listHtml.match(/<h3>/g) || []).length,
+      kv_total: items.length,
+      moneylink_count: moneylinkItems.length,
+      google_count: googleItems.length,
+      sample_links: items.slice(0, 5).map(it => ({ src: it.src, title: (it.title||"").slice(0,30), link: (it.link||"").slice(0,70) })),
     };
 
-    // 抓所有標題(不限熱門族群),看實際標題長怎樣
-    const linkRe = /<a[^>]+href="([^"]*NewsContent\.aspx[^"]*)"[^>]*>\s*<h3>([^<]+)<\/h3>/gi;
-    const allTitles = [];
-    let m;
-    while ((m = linkRe.exec(listHtml)) !== null) {
-      allTitles.push(m[2].trim());
+    if (!moneylinkItems.length) {
+      return res.json({ ok: false, step: "no-moneylink", note: "KV 裡沒有富聯網來源(NewsContent)的新聞", diag });
     }
 
-    // 找第一則熱門族群
-    let target = null;
-    linkRe.lastIndex = 0;
-    while ((m = linkRe.exec(listHtml)) !== null) {
-      const title = m[2].trim();
-      if (title.includes("熱門族群")) {
-        const href = m[1].trim();
-        target = { title, link: href.startsWith("http") ? href : `https://ww2.money-link.com.tw/realtimenews/${href}` };
-        break;
-      }
-    }
-
-    if (!target) {
-      return res.json({
-        ok: false, step: "list", note: "列表頁找不到熱門族群標題",
-        diag,
-        title_count: allTitles.length,
-        sample_titles: allTitles.slice(0, 15),
-      });
-    }
-
+    // 抓第一則富聯網新聞的內文
+    const target = moneylinkItems[0];
     const pageHtml = await fetchHtml(target.link, { "Referer": "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002" });
     if (!pageHtml) {
       return res.json({ ok: false, step: "content", note: "內頁抓不到(空)", link: target.link, diag });
@@ -514,7 +491,7 @@ app.get("/api/test-newscontent", async (req, res) => {
       title: target.title,
       link: target.link,
       pageLen: pageHtml.length,
-      bodyHead: bodyText.slice(0, 600),
+      bodyHead: bodyText.slice(0, 800),
       stock_matches: stocks.slice(0, 40),
       stock_count: stocks.length,
     });
