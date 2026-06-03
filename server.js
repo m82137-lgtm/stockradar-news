@@ -261,57 +261,31 @@ async function fetchMoneyLink() {
   return items;
 }
 
-// ── 抓單則富聯網新聞內文，解析出內文點名的個股股號(4碼) ──
-// 只回股號陣列(去重、最多 12 檔)；股名交給前端用內文正則名稱顯示。
-// 僅對富聯網來源(link 含 NewsContent.aspx)有效，Google RSS 轉址 link 無法抓。
-async function fetchNewsStocks(link) {
+// ── 爬單則富聯網新聞內文，抓出內文點名的股號(4碼)。只回股號陣列，股名交給前端用 120 檔配。──
+async function fetchNewsStockCodes(link) {
   if (!link || !link.includes("NewsContent.aspx")) return [];
   try {
     const html = await fetchHtml(link, {
       "Referer": "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002",
     });
     if (!html) return [];
-
     const bodyText = html
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<style[\s\S]*?<\/style>/gi, "")
       .replace(/<[^>]+>/g, " ")
       .replace(/&nbsp;/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    // 抓「名稱(股號4碼)」，名稱取緊貼括號前的字，再清掉開頭贅字
-    const re = /([\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9*\-]{1,9})\((\d{4})\)/g;
-    // 常見黏在股名前的連接詞/贅字（由長到短，逐一從開頭剝除）
-    const JUNK = ["帶領", "攜手", "包括", "以及", "其中", "像是", "例如", "還有", "及", "和", "與", "的", "股", "在", "讓", "B股", "A股"];
-    const cleanName = (raw) => {
-      let s = raw.trim();
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (const j of JUNK) {
-          if (s.length > j.length && s.startsWith(j)) {
-            s = s.slice(j.length);
-            changed = true;
-            break;
-          }
-        }
-      }
-      // 仍過長(>5字)就取後 4 字
-      if (s.length > 5) s = s.slice(-4);
-      return s;
-    };
-    const map = new Map();   // code -> name
+      .replace(/\s+/g, " ");
+    // 抓「(4碼數字)」括號內股號；用 Set 去重，最多 15 檔
+    const re = /[（(](\d{4})[）)]/g;
+    const seen = new Set();
     let m;
     while ((m = re.exec(bodyText)) !== null) {
-      const code = m[2];
-      const name = cleanName(m[1]);
-      if (!map.has(code)) map.set(code, name);
+      if (!seen.has(m[1])) seen.add(m[1]);
+      if (seen.size >= 15) break;
     }
-
-    return [...map.entries()].slice(0, 12).map(([code, name]) => ({ code, name }));
+    return [...seen];
   } catch (e) {
-    console.log("fetchNewsStocks error:", e.message);
+    console.log("fetchNewsStockCodes error:", e.message);
     return [];
   }
 }
@@ -336,7 +310,7 @@ async function updateSectorNews() {
     const rssItems = [...parseRSS(rss1), ...parseRSS(rss2)].filter(it => isHotSectorTitle(it.title));
     console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》（兩組關鍵字合計）`);
 
-    // 合併，依標題去重。富聯網排前面 → 同標題時保留富聯網版本(有真內頁 link，能抓內文)
+    // 合併，依標題去重。富聯網排前面 → 同標題保留富聯網版(有真內頁能爬內文)
     const allItems = [...moneyLinkItems, ...rssItems];
     const newItems = uniqueNews(allItems);
 
@@ -357,17 +331,16 @@ async function updateSectorNews() {
     // 合併保留 15 天
     const merged = mergeNews(newItems, oldItems, HOT_SECTOR_KEEP_DAYS);
 
-    // ── 對「富聯網來源、且還沒抓過 stocks」的新聞補抓內文、解析個股(方案A：只抓新的，零浪費) ──
+    // ── 對「富聯網來源、還沒抓過 stocks」的新聞補爬內文抓股號(方案A：只抓新的) ──
     let stockFetched = 0;
     for (const item of merged) {
-      const isMoneyLink = item.link && item.link.includes("NewsContent.aspx");
-      if (!isMoneyLink) continue;          // Google RSS 轉址抓不到內頁，跳過
-      if (Array.isArray(item.stocks)) continue;  // 已抓過(含抓到空陣列)，不重抓
-      item.stocks = await fetchNewsStocks(item.link);
+      if (!(item.link && item.link.includes("NewsContent.aspx"))) continue; // 只富聯網
+      if (Array.isArray(item.stocks)) continue;                              // 已抓過跳過
+      item.stocks = await fetchNewsStockCodes(item.link);                    // 純股號陣列
       stockFetched++;
-      await new Promise(r => setTimeout(r, 150));  // 內頁之間小延遲，避免限流
+      await new Promise(r => setTimeout(r, 150));
     }
-    if (stockFetched) console.log(`族群個股：本次補抓 ${stockFetched} 則內文`);
+    if (stockFetched) console.log(`族群個股：本次補抓 ${stockFetched} 則內文股號`);
 
     // 寫入 KV，TTL 16 天
     const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 16);
@@ -509,72 +482,27 @@ app.get("/api/otc-daily", async (req, res) => {
   }
 });
 
-// 手動補抓：對 KV 現有的富聯網新聞補 stocks。?force=1 強制重抓(覆蓋舊的，用於改了解析邏輯後刷新)
+// 手動補抓現有富聯網新聞的股號。?force=1 強制重抓
 app.get("/api/backfill-stocks", async (req, res) => {
   try {
     const force = req.query.force === "1";
     const data = await kvGet('sectors');
     const items = Array.isArray(data) ? data : [];
-    let fetched = 0, skipped = 0, googleSkip = 0;
-
+    let fetched = 0, already = 0, googleSkip = 0;
     for (const item of items) {
-      const isMoneyLink = item.link && item.link.includes("NewsContent.aspx");
-      if (!isMoneyLink) { googleSkip++; continue; }
-      if (!force && Array.isArray(item.stocks)) { skipped++; continue; }
-      item.stocks = await fetchNewsStocks(item.link);
+      if (!(item.link && item.link.includes("NewsContent.aspx"))) { googleSkip++; continue; }
+      if (!force && Array.isArray(item.stocks)) { already++; continue; }
+      item.stocks = await fetchNewsStockCodes(item.link);
       fetched++;
       await new Promise(r => setTimeout(r, 150));
     }
-
-    if (fetched) {
-      await kvPut('sectors', items, 60 * 60 * 24 * 16);
-    }
-
+    if (fetched) await kvPut('sectors', items, 60 * 60 * 24 * 16);
     res.json({
-      ok: true,
-      force,
-      total: items.length,
-      moneylink_fetched: fetched,
-      moneylink_already: skipped,
-      google_skipped: googleSkip,
-      sample: items.filter(it => Array.isArray(it.stocks) && it.stocks.length)
-                   .slice(0, 6)
-                   .map(it => ({ title: it.title.slice(0, 30), stocks: it.stocks })),
+      ok: true, force, total: items.length,
+      moneylink_fetched: fetched, moneylink_already: already, google_skipped: googleSkip,
+      sample: items.filter(it => Array.isArray(it.stocks) && it.stocks.length).slice(0, 6)
+                   .map(it => ({ title: it.title.slice(0, 28), stocks: it.stocks })),
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// 臨時測試：MIS 即時報價擋不擋 Render(查華城1519等，看 z現價/u漲停價)
-app.get("/api/test-mis", async (req, res) => {
-  try {
-    const codes = (req.query.codes || "1519,2330,5274").split(",").map(s => s.trim()).filter(Boolean);
-    // 預設都用 tse_，上櫃要 otc_(這裡先全試 tse_，之後正式版會判斷市場)
-    const exch = codes.map(c => `tse_${c}.tw`).join("|");
-    const url = `https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=${exch}&json=1&delay=0&_=${Date.now()}`;
-    const r = await fetch(url, {
-      headers: {
-        "User-Agent": BROWSER_UA,
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://mis.twse.com.tw/stock/index.jsp",
-      },
-    });
-    const status = r.status;
-    const text = await r.text();
-    const blocked = /安全性考量|FOR SECURITY REASONS|<html/i.test(text);
-    if (blocked) {
-      return res.json({ ok: false, blocked: true, status, head: text.slice(0, 200) });
-    }
-    let json = null;
-    try { json = JSON.parse(text); } catch {}
-    const arr = json?.msgArray || [];
-    const parsed = arr.map(s => ({
-      code: s.c, name: s.n,
-      price: s.z, high: s.h, limitUp: s.u, prevClose: s.y,
-      isLimitUp: s.z !== "-" && s.u !== "-" && parseFloat(s.z) >= parseFloat(s.u),
-    }));
-    res.json({ ok: true, status, rtcode: json?.rtcode, count: arr.length, parsed, head: text.slice(0, 150) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
