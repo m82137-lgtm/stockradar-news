@@ -492,6 +492,41 @@ app.get("/api/otc-daily", async (req, res) => {
   }
 });
 
+// 手動補抓：對 KV 現有的富聯網新聞補 stocks(沒抓過的才抓)，方便立即測試
+app.get("/api/backfill-stocks", async (req, res) => {
+  try {
+    const data = await kvGet('sectors');
+    const items = Array.isArray(data) ? data : [];
+    let fetched = 0, skipped = 0, googleSkip = 0;
+
+    for (const item of items) {
+      const isMoneyLink = item.link && item.link.includes("NewsContent.aspx");
+      if (!isMoneyLink) { googleSkip++; continue; }
+      if (Array.isArray(item.stocks)) { skipped++; continue; }
+      item.stocks = await fetchNewsStocks(item.link);
+      fetched++;
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    if (fetched) {
+      await kvPut('sectors', items, 60 * 60 * 24 * 16);
+    }
+
+    res.json({
+      ok: true,
+      total: items.length,
+      moneylink_fetched: fetched,
+      moneylink_already: skipped,
+      google_skipped: googleSkip,
+      sample: items.filter(it => Array.isArray(it.stocks) && it.stocks.length)
+                   .slice(0, 5)
+                   .map(it => ({ title: it.title.slice(0, 30), stocks: it.stocks })),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
   await updateSectorNews();
