@@ -261,35 +261,6 @@ async function fetchMoneyLink() {
   return items;
 }
 
-// ── 爬單則富聯網新聞內文，抓出內文點名的股號(4碼)。只回股號陣列，股名交給前端用 120 檔配。──
-async function fetchNewsStockCodes(link) {
-  if (!link || !link.includes("NewsContent.aspx")) return [];
-  try {
-    const html = await fetchHtml(link, {
-      "Referer": "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002",
-    });
-    if (!html) return [];
-    const bodyText = html
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/g, " ")
-      .replace(/\s+/g, " ");
-    // 抓「(4碼數字)」括號內股號；用 Set 去重，最多 15 檔
-    const re = /[（(](\d{4})[）)]/g;
-    const seen = new Set();
-    let m;
-    while ((m = re.exec(bodyText)) !== null) {
-      if (!seen.has(m[1])) seen.add(m[1]);
-      if (seen.size >= 15) break;
-    }
-    return [...seen];
-  } catch (e) {
-    console.log("fetchNewsStockCodes error:", e.message);
-    return [];
-  }
-}
-
 
 
 // ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
@@ -330,17 +301,6 @@ async function updateSectorNews() {
 
     // 合併保留 15 天
     const merged = mergeNews(newItems, oldItems, HOT_SECTOR_KEEP_DAYS);
-
-    // ── 對「富聯網來源、還沒抓過 stocks」的新聞補爬內文抓股號(方案A：只抓新的) ──
-    let stockFetched = 0;
-    for (const item of merged) {
-      if (!(item.link && item.link.includes("NewsContent.aspx"))) continue; // 只富聯網
-      if (Array.isArray(item.stocks)) continue;                              // 已抓過跳過
-      item.stocks = await fetchNewsStockCodes(item.link);                    // 純股號陣列
-      stockFetched++;
-      await new Promise(r => setTimeout(r, 150));
-    }
-    if (stockFetched) console.log(`族群個股：本次補抓 ${stockFetched} 則內文股號`);
 
     // 寫入 KV，TTL 16 天
     const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 16);
@@ -479,32 +439,6 @@ app.get("/api/otc-daily", async (req, res) => {
   } catch (e) {
     console.error("/api/otc-daily error:", e.message);
     res.status(500).json({ ok: false, error: e.message, data: [] });
-  }
-});
-
-// 手動補抓現有富聯網新聞的股號。?force=1 強制重抓
-app.get("/api/backfill-stocks", async (req, res) => {
-  try {
-    const force = req.query.force === "1";
-    const data = await kvGet('sectors');
-    const items = Array.isArray(data) ? data : [];
-    let fetched = 0, already = 0, googleSkip = 0;
-    for (const item of items) {
-      if (!(item.link && item.link.includes("NewsContent.aspx"))) { googleSkip++; continue; }
-      if (!force && Array.isArray(item.stocks)) { already++; continue; }
-      item.stocks = await fetchNewsStockCodes(item.link);
-      fetched++;
-      await new Promise(r => setTimeout(r, 150));
-    }
-    if (fetched) await kvPut('sectors', items, 60 * 60 * 24 * 16);
-    res.json({
-      ok: true, force, total: items.length,
-      moneylink_fetched: fetched, moneylink_already: already, google_skipped: googleSkip,
-      sample: items.filter(it => Array.isArray(it.stocks) && it.stocks.length).slice(0, 6)
-                   .map(it => ({ title: it.title.slice(0, 28), stocks: it.stocks })),
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
