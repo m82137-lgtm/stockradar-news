@@ -19,6 +19,10 @@ const CF_KV_NAMESPACE_ID = process.env.CF_KV_NAMESPACE_ID;
 const CF_KV_TOKEN = process.env.CF_KV_TOKEN;
 const KV_API = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/storage/kv/namespaces/${CF_KV_NAMESPACE_ID}/values`;
 
+// Telegram 推播設定（存 Render 環境變數；沒設則靜默不推，不影響新聞功能）
+const TG_TOKEN = process.env.TG_TOKEN;
+const TG_CHAT_ID = process.env.TG_CHAT_ID;
+
 const HOT_SECTOR_KEEP_DAYS = 15;
 
 function now() {
@@ -265,6 +269,59 @@ async function fetchMoneyLink() {
 
 // ── 工商時報：因 Cloudflare 擋 Render 雲端 IP，已移除（未來用付費代理可加回）─
 
+// ── Telegram 推播工具 ───────────────────────────
+function escHtml(s = "") {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// ISO → 台灣時間 MM/DD HH:MM
+function fmtTwShort(iso) {
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    const tw = new Date(d.getTime() + 8 * 3600 * 1000);
+    const mm = String(tw.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(tw.getUTCDate()).padStart(2, "0");
+    const hh = String(tw.getUTCHours()).padStart(2, "0");
+    const mi = String(tw.getUTCMinutes()).padStart(2, "0");
+    return `${mm}/${dd} ${hh}:${mi}`;
+  } catch {
+    return "";
+  }
+}
+
+// 送 Telegram 訊息（沒設 Token/ChatID 就靜默跳過，回傳 false 不報錯）
+async function sendTelegram(text) {
+  if (!TG_TOKEN || !TG_CHAT_ID) return false;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: false,
+      }),
+    });
+    if (!res.ok) console.log(`TG send 失敗 status=${res.status}`);
+    return res.ok;
+  } catch (e) {
+    console.log("TG send error:", e.message);
+    return false;
+  }
+}
+
+// 單則熱門族群新聞 → TG 訊息（標題做成超連結 + 附裸網址，確保點得到）
+function formatSectorTg(item) {
+  const title = escHtml(item.title || "");
+  const src   = escHtml(item.src || "富聯網");
+  const time  = fmtTwShort(item.pub);
+  const url   = escHtml(item.link || "");
+  // 第二行：標題本身是可點超連結；第四行：附完整網址（備援，TG 也會渲染成可點）
+  return `📊 熱門族群新聞\n<a href="${url}">${title}</a>\n${src} ${time}\n${url}`;
+}
+
 // ── 熱門族群：2 個爬蟲源 + 2 組 Google RSS → 比對新舊 → 有新才寫 KV ──
 async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
@@ -294,7 +351,11 @@ async function updateSectorNews() {
     const oldData = await kvGet('sectors');
     const oldItems = Array.isArray(oldData) ? oldData : [];
 
-    if (!hasNewItems(newItems, oldItems)) {
+    // 這次相對 KV 舊資料「真正新進」的新聞（用 link 比對，與去重邏輯一致）
+    const oldLinks = new Set(oldItems.map(n => n.link).filter(Boolean));
+    const freshItems = newItems.filter(n => n.link && !oldLinks.has(n.link));
+
+    if (!freshItems.length) {
       console.log("熱門族群：無新新聞，跳過寫入");
       return;
     }
@@ -304,7 +365,18 @@ async function updateSectorNews() {
 
     // 寫入 KV，TTL 16 天
     const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 16);
-    console.log(`熱門族群：${newItems.length} 則新，合計 ${merged.length} 則，寫入KV ${ok ? '✅' : '❌'}`);
+    console.log(`熱門族群：${freshItems.length} 則新，合計 ${merged.length} 則，寫入KV ${ok ? '✅' : '❌'}`);
+
+    // ── TG 推播：KV 寫入成功後，只推這次新進、且來源為富聯網的（連結乾淨可點）──
+    // 一則一則推；已看過的新聞在 freshItems 那關就被擋掉，不會重複推。
+    if (ok) {
+      const toPush = freshItems.filter(it => it.src === "富聯網" && /^https?:\/\//.test(it.link || ""));
+      for (const item of toPush) {
+        await sendTelegram(formatSectorTg(item));
+        await new Promise(r => setTimeout(r, 400)); // 間隔避免 TG 限流
+      }
+      if (toPush.length) console.log(`TG 推播熱門族群 ${toPush.length} 則（富聯網）`);
+    }
 
   } catch (e) {
     console.error("updateSectorNews error:", e.message);
@@ -358,12 +430,7 @@ async function fetchOtcDaily() {
   return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
 }
 
-// 盤中：UTC 01:00~06:59（台灣時間 09:00~14:59）週一~五每5分鐘
-cron.schedule("*/5 1-6 * * 1-5", async () => {
-  await updateSectorNews();
-});
-
-// 非盤中：每5分鐘
+// 全天每 5 分鐘更新熱門族群新聞（含盤中盤後；有新聞才寫 KV）
 cron.schedule("*/5 * * * *", async () => {
   await updateSectorNews();
 });
