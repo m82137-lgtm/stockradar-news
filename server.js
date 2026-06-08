@@ -383,6 +383,76 @@ async function updateSectorNews() {
   }
 }
 
+// ── 台股新聞（鉅亨網）：搬自 Worker，每5分鐘抓 → 有新才寫 KV 'news' ──
+// 前端鉅亨認的格式是 {title, url, time, cat, ts}，用 url/ts 自己一套去重
+// （不共用熱門族群的 mergeNews，因為那套找 item.pub，鉅亨是 ts，硬套會把新聞全過濾掉）
+const CNYES_KEEP_DAYS = 7;
+const CNYES_MAX = 300;
+
+function cnyesKey(n) { return n.url || (n.title || '').trim(); }
+
+function cnyesMerge(newItems, oldItems) {
+  const map = new Map();
+  for (const n of [...(oldItems || []), ...(newItems || [])]) {
+    const key = cnyesKey(n);
+    if (!key) continue;
+    const prev = map.get(key);
+    if (!prev || (n.ts || 0) > (prev.ts || 0)) map.set(key, n);
+  }
+  const cutoff = Date.now() - CNYES_KEEP_DAYS * 24 * 60 * 60 * 1000;
+  return [...map.values()]
+    .filter(n => (n.ts || 0) > cutoff)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .slice(0, CNYES_MAX);
+}
+
+function cnyesHasNew(newItems, oldItems) {
+  const oldKeys = new Set((oldItems || []).map(cnyesKey).filter(Boolean));
+  return (newItems || []).some(n => !oldKeys.has(cnyesKey(n)));
+}
+
+async function updateTwNews() {
+  console.log(`[${now()}] 更新台股新聞（鉅亨）`);
+  try {
+    const newItems = [];
+    const categories = ['tw_stock_news', 'tw_stock_headline', 'tw_stock'];
+    for (const cat of categories) {
+      try {
+        const res  = await fetch(`https://api.cnyes.com/media/api/v1/newslist/category/${cat}?limit=200&page=1`);
+        const json = await res.json();
+        const data = json?.items?.data || [];
+        for (const n of data) {
+          newItems.push({
+            title: n.title,
+            time:  new Date(n.publishAt * 1000).toLocaleString('zh-TW', {
+              timeZone: 'Asia/Taipei',
+              year: 'numeric', month: 'numeric', day: 'numeric',
+              hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true,
+            }),
+            url:  `https://news.cnyes.com/news/id/${n.newsId}`,
+            cat:  (n.categoryName || '').split(',')[0].trim(),
+            ts:   n.publishAt * 1000,
+          });
+        }
+      } catch (e) { console.log(`鉅亨 ${cat} error:`, e.message); }
+    }
+
+    if (!newItems.length) { console.log('台股新聞：無資料'); return; }
+
+    const oldItems = (await kvGet('news')) || [];
+    const merged = cnyesMerge(newItems, oldItems);
+
+    if (!cnyesHasNew(newItems, oldItems)) {
+      console.log('台股新聞：無新新聞，跳過寫入');
+      return;
+    }
+    const ok = await kvPut('news', merged, 60 * 60 * 24 * 8);
+    console.log(`台股新聞：${newItems.length} 則候選，合計 ${merged.length}，寫入KV ${ok ? '✅' : '❌'}`);
+  } catch (e) {
+    console.error('updateTwNews error:', e.message);
+  }
+}
+
 // ── 上櫃每日收盤行情代打：Worker 打不到櫃買(Cloudflare 擋 Worker)，改由 Render 代打 ──
 // 來源：櫃買 OpenAPI「上櫃股票每日收盤行情(不含定價)」，一次回全部上櫃股
 // 回傳正規化後的清單：code / name / close / chgPct / vol(張) / tradeValue(元)
@@ -433,6 +503,7 @@ async function fetchOtcDaily() {
 // 全天每 5 分鐘更新熱門族群新聞（含盤中盤後；有新聞才寫 KV）
 cron.schedule("*/5 * * * *", async () => {
   await updateSectorNews();
+  await updateTwNews();   // 台股新聞（鉅亨）：搬自 Worker，每5分鐘抓→有新才寫 KV
 });
 
 // 健康檢查（UptimeRobot ping 用）
@@ -462,7 +533,7 @@ app.get("/api/stock-news", async (req, res) => {
     }
   }
 
-  const sorted = uniqueNews(allItems).sort((a, b) => new Date(b.pub) - new Date(a.pub)).slice(0, 15);
+  const sorted = uniqueNews(allItems).sort((a, b) => new Date(b.pub) - new Date(a.pub)).slice(0, 30);
   res.json([{
     time: now(),
     keyword: `${name} ${code}`,
@@ -512,4 +583,5 @@ app.get("/api/otc-daily", async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
   await updateSectorNews();
+  await updateTwNews();   // 啟動先抓一次台股新聞，不用等第一個5分鐘
 });
