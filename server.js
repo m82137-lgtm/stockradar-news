@@ -323,6 +323,26 @@ function formatSectorTg(item) {
 }
 
 // ── 熱門族群：2 個爬蟲源 + 2 組 Google RSS → 比對新舊 → 有新才寫 KV ──
+// ── 從富聯網內文抓「指標股」：regex 抓括號裡的股號 (4~6位數字) → 用對照表驗證是不是真台股 ──
+// 富聯網內文格式固定是「股名(股號)」，所以只抓括號數字、再用對照表過濾，年份/價格那種裸數字天然不會中。
+function extractStocks(html, codeNameMap) {
+  if (!html || !codeNameMap) return [];
+  const out = [];
+  const seen = new Set();
+  const re = /\((\d{4,6})\)/g;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const code = m[1];
+    if (seen.has(code)) continue;
+    const name = codeNameMap[code];
+    if (!name) continue;          // 對照表沒有 → 不是台股（排除年份2026、價格等）
+    seen.add(code);
+    out.push({ code, name });
+    if (out.length >= 30) break;  // 上限保險
+  }
+  return out;
+}
+
 async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
@@ -358,6 +378,27 @@ async function updateSectorNews() {
     if (!freshItems.length) {
       console.log("熱門族群：無新新聞，跳過寫入");
       return;
+    }
+
+    // ── 對「新進的富聯網新聞」爬內文抓指標股（freshItems 才爬，舊的股號已在 KV 不重爬）──
+    const codeNameMap = await kvGet('code_name_map') || {};
+    const mapReady = Object.keys(codeNameMap).length > 50;
+    if (mapReady) {
+      const toScan = freshItems.filter(it => it.src === "富聯網" && /^https?:\/\//.test(it.link || ""));
+      let hit = 0;
+      for (const item of toScan) {
+        try {
+          const html = await fetchHtml(item.link);
+          item.stocks = extractStocks(html, codeNameMap);
+          if (item.stocks.length) hit++;
+        } catch (e) {
+          item.stocks = [];
+        }
+        await new Promise(r => setTimeout(r, 300)); // 控速，避免打太兇
+      }
+      console.log(`指標股：掃 ${toScan.length} 則內文，${hit} 則抓到股號`);
+    } else {
+      console.log("指標股：對照表未就緒，跳過抓股號");
     }
 
     // 合併保留 15 天
