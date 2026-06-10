@@ -325,19 +325,24 @@ function formatSectorTg(item) {
 // ── 熱門族群：2 個爬蟲源 + 2 組 Google RSS → 比對新舊 → 有新才寫 KV ──
 // ── 從富聯網內文抓「指標股」：regex 抓括號裡的股號 (4~6位數字) → 用對照表驗證是不是真台股 ──
 // 富聯網內文格式固定是「股名(股號)」，所以只抓括號數字、再用對照表過濾，年份/價格那種裸數字天然不會中。
+// 注意：富聯網用「全形括號（）」，也相容半形 ()。對照表可能是舊格式 {code:name} 或新格式 {code:{name,market}}。
 function extractStocks(html, codeNameMap) {
   if (!html || !codeNameMap) return [];
   const out = [];
   const seen = new Set();
-  const re = /\((\d{4,6})\)/g;
+  const re = /[（(](\d{4,6})[）)]/g;   // 全形（）與半形() 都吃
   let m;
   while ((m = re.exec(html)) !== null) {
     const code = m[1];
     if (seen.has(code)) continue;
-    const name = codeNameMap[code];
-    if (!name) continue;          // 對照表沒有 → 不是台股（排除年份2026、價格等）
+    const entry = codeNameMap[code];
+    if (!entry) continue;          // 對照表沒有 → 不是台股（排除年份2026、價格等）
+    // 相容新舊格式：舊 = 字串(股名)；新 = 物件 {name, market}
+    const name   = typeof entry === "string" ? entry : entry.name;
+    const market = typeof entry === "string" ? "" : (entry.market || "");
+    if (!name) continue;
     seen.add(code);
-    out.push({ code, name });
+    out.push({ code, name, market });
     if (out.length >= 30) break;  // 上限保險
   }
   return out;
