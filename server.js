@@ -381,9 +381,15 @@ async function updateSectorNews() {
     const oldData = await kvGet('sectors');
     const oldItems = Array.isArray(oldData) ? oldData : [];
 
-    // 這次相對 KV 舊資料「真正新進」的新聞（用 link 比對，與去重邏輯一致）
-    const oldLinks = new Set(oldItems.map(n => n.link).filter(Boolean));
-    const freshItems = newItems.filter(n => n.link && !oldLinks.has(n.link));
+    // 這次相對 KV 舊資料「真正新進」的新聞
+    // link + 標題雙重比對（與 mergeNews 去重鍵一致）：同一則新聞的「富聯網直爬版」
+    // 與「Google RSS 版」連結不同，只比 link 會把舊聞誤判成新進 → 加比標題堵住
+    const oldLinks  = new Set(oldItems.map(n => n.link).filter(Boolean));
+    const oldTitles = new Set(oldItems.map(n => (n.title || '').trim()).filter(Boolean));
+    const freshItems = newItems.filter(n =>
+      n.link && !oldLinks.has(n.link) &&
+      !(n.title && oldTitles.has(n.title.trim()))
+    );
 
     if (!freshItems.length) {
       console.log("熱門族群：無新新聞，跳過寫入");
@@ -420,8 +426,14 @@ async function updateSectorNews() {
 
     // ── TG 推播：KV 寫入成功後，只推這次新進、且來源為富聯網的（連結乾淨可點）──
     // 一則一則推；已看過的新聞在 freshItems 那關就被擋掉，不會重複推。
+    // 保險絲：發布時間 12 小時內才推（就算前面誤判，舊聞也推不出去；pub 壞掉算 NaN 也擋）
     if (ok) {
-      const toPush = freshItems.filter(it => it.src === "富聯網" && /^https?:\/\//.test(it.link || ""));
+      const PUSH_WINDOW_MS = 12 * 60 * 60 * 1000;
+      const toPush = freshItems.filter(it =>
+        it.src === "富聯網" &&
+        /^https?:\/\//.test(it.link || "") &&
+        (Date.now() - new Date(it.pub).getTime()) < PUSH_WINDOW_MS
+      );
       for (const item of toPush) {
         await sendTelegram(formatSectorTg(item));
         await new Promise(r => setTimeout(r, 400)); // 間隔避免 TG 限流
