@@ -201,9 +201,9 @@ function isHotSectorTitle(title) {
   return title.trim().startsWith("《熱門族群》");
 }
 
-// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002) 前 10 頁 ──
-// 翻頁參數 PGNum，第 1 頁無參數，第 2~10 頁加 &PGNum=N
-// 《熱門族群》發布後會被其他新聞往後擠，抓 10 頁(約200則)降低漏接
+// ── 富聯網爬蟲：抓「新聞 > 台股新聞」分類 (NType=0002) 前 15 頁 ──
+// 翻頁參數 PGNum，第 1 頁無參數，第 2~15 頁加 &PGNum=N
+// 《熱門族群》發布後會被其他新聞往後擠，抓 15 頁(150則)降低漏接(盤後投信買賣超會洗版)
 // 富聯網列表頁時間格式：「來源 2026/06/02 17:43」，是台灣時間。
 // 解析成帶 +08:00 的 ISO（存成 UTC），讓前端 new Date() 顯示正確時間。
 function moneyLinkDateToIso(seg) {
@@ -222,7 +222,7 @@ async function fetchMoneyLink() {
 
   let totalHotCount = 0;
 
-  for (let page = 1; page <= 10; page++) {
+  for (let page = 1; page <= 15; page++) {
     const url = page === 1
       ? "https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002"
       : `https://ww2.money-link.com.tw/realtimenews/Index.aspx?NType=0002&PGNum=${page}`;
@@ -261,7 +261,7 @@ async function fetchMoneyLink() {
     await new Promise(r => setTimeout(r, 200));
   }
 
-  console.log(`富聯網：10頁共「熱門族群」字串 ${totalHotCount} 次，抓到 ${items.length} 則《熱門族群》`);
+  console.log(`富聯網：15頁共「熱門族群」字串 ${totalHotCount} 次，抓到 ${items.length} 則《熱門族群》`);
   return items;
 }
 
