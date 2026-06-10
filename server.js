@@ -301,7 +301,7 @@ async function sendTelegram(text) {
         chat_id: TG_CHAT_ID,
         text,
         parse_mode: "HTML",
-        disable_web_page_preview: false,
+        disable_web_page_preview: true,
       }),
     });
     if (!res.ok) console.log(`TG send 失敗 status=${res.status}`);
@@ -318,8 +318,13 @@ function formatSectorTg(item) {
   const src   = escHtml(item.src || "富聯網");
   const time  = fmtTwShort(item.pub);
   const url   = escHtml(item.link || "");
-  // 第二行：標題本身是可點超連結；第四行：附完整網址（備援，TG 也會渲染成可點）
-  return `📊 熱門族群新聞\n<a href="${url}">${title}</a>\n${src} ${time}\n${url}`;
+  // 指標股那行（有抓到才顯示）：🎯 長榮(2603) 陽明(2609) 萬海(2615)
+  const stocks = Array.isArray(item.stocks) ? item.stocks : [];
+  const stockLine = stocks.length
+    ? `🎯 ${stocks.map(s => `${escHtml(s.name)}(${s.code})`).join(" ")}\n`
+    : "";
+  // 第二行：標題本身是可點超連結；最後一行：附完整網址（備援）
+  return `📊 熱門族群新聞\n<a href="${url}">${title}</a>\n${stockLine}${src} ${time}\n${url}`;
 }
 
 // ── 熱門族群：2 個爬蟲源 + 2 組 Google RSS → 比對新舊 → 有新才寫 KV ──
