@@ -323,8 +323,8 @@ function formatSectorTg(item) {
   const stockLine = stocks.length
     ? `🎯 ${stocks.map(s => `${escHtml(s.name)}(${s.code})`).join(" ")}\n`
     : "";
-  // 第二行：標題本身是可點超連結；最後一行：附完整網址（備援）
-  return `📊 熱門族群新聞\n<a href="${url}">${title}</a>\n${stockLine}${src} ${time}\n${url}`;
+  // 第二行：標題本身是可點超連結（不附裸網址、不顯示預覽）
+  return `📊 熱門族群新聞\n<a href="${url}">${title}</a>\n${stockLine}${src} ${time}`;
 }
 
 // ── 熱門族群：2 個爬蟲源 + 2 組 Google RSS → 比對新舊 → 有新才寫 KV ──
