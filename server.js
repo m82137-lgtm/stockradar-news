@@ -313,6 +313,40 @@ async function sendTelegram(text) {
 }
 
 // 單則熱門族群新聞 → TG 訊息（標題做成超連結 + 附裸網址，確保點得到）
+// ── chip 補爬：對「富聯網直爬版但 stocks 空」的新聞補抓指標股 ──
+// 每輪最多 5 則、每則最多試 3 次。fetchHtml 失敗不計次（網路問題不消耗機會），
+// 爬成功但沒股號才 +1，滿 3 次放棄（推測該篇本來就沒寫股號）。
+// 次數記憶體+KV雙軌：盤中隨寫入持久化，process 重啟最多重試幾次、無害。
+const CHIP_REFILL_MAX_PER_ROUND = 5;
+const CHIP_MAX_TRIES = 3;
+const chipTryMem = new Map(); // link -> 已嘗試次數
+
+async function refillChips(items, codeNameMap) {
+  const candidates = items.filter(it =>
+    it.src === "富聯網" &&
+    /^https?:\/\//.test(it.link || "") &&
+    (!Array.isArray(it.stocks) || !it.stocks.length) &&
+    Math.max(it.chipTries || 0, chipTryMem.get(it.link) || 0) < CHIP_MAX_TRIES
+  ).slice(0, CHIP_REFILL_MAX_PER_ROUND);
+
+  let gained = 0;
+  for (const item of candidates) {
+    const html = await fetchHtml(item.link); // 失敗回 ""，已自帶 log
+    if (html) {
+      const stocks = extractStocks(html, codeNameMap);
+      if (stocks.length) { item.stocks = stocks; gained++; }
+      else {
+        const t = Math.max(item.chipTries || 0, chipTryMem.get(item.link) || 0) + 1;
+        item.chipTries = t;
+        chipTryMem.set(item.link, t);
+      }
+    }
+    await new Promise(r => setTimeout(r, 300)); // 控速
+  }
+  if (candidates.length) console.log(`chip補爬：掃 ${candidates.length} 則，補到 ${gained} 則`);
+  return gained;
+}
+
 function formatSectorTg(item) {
   const title = escHtml(item.title || "");
   const src   = escHtml(item.src || "富聯網");
@@ -391,14 +425,25 @@ async function updateSectorNews() {
       !(n.title && oldTitles.has(n.title.trim()))
     );
 
+    // 對照表提前載入（補爬與新進掃描共用；KV 讀取額度寬鬆、多讀無妨）
+    const codeNameMap = await kvGet('code_name_map') || {};
+    const mapReady = Object.keys(codeNameMap).length > 50;
+
     if (!freshItems.length) {
+      // 無新新聞：順手補爬 KV 裡缺 chip 的舊新聞，有補到才額外寫一次 KV（沒補到不寫、零浪費）
+      if (mapReady) {
+        const gained = await refillChips(oldItems, codeNameMap);
+        if (gained) {
+          const ok2 = await kvPut('sectors', oldItems, 60 * 60 * 24 * 16);
+          console.log(`熱門族群：無新新聞，chip補爬回寫 ${gained} 則，寫入KV ${ok2 ? '✅' : '❌'}`);
+          return;
+        }
+      }
       console.log("熱門族群：無新新聞，跳過寫入");
       return;
     }
 
     // ── 對「新進的富聯網新聞」爬內文抓指標股（freshItems 才爬，舊的股號已在 KV 不重爬）──
-    const codeNameMap = await kvGet('code_name_map') || {};
-    const mapReady = Object.keys(codeNameMap).length > 50;
     if (mapReady) {
       const toScan = freshItems.filter(it => it.src === "富聯網" && /^https?:\/\//.test(it.link || ""));
       let hit = 0;
@@ -417,8 +462,23 @@ async function updateSectorNews() {
       console.log("指標股：對照表未就緒，跳過抓股號");
     }
 
+    // ── chip 保留（修洗掉 bug）：還在 15 頁內的舊新聞每輪會重爬進 newItems（沒 stocks），
+    // mergeNews 新蓋舊會把 KV 已抓到的指標股洗掉 → 合併前把舊版 stocks/chipTries 搬過來（標題對齊）──
+    const oldByTitle = new Map(oldItems.filter(n => n.title).map(n => [n.title.trim(), n]));
+    for (const it of newItems) {
+      const old = it.title ? oldByTitle.get(it.title.trim()) : null;
+      if (!old) continue;
+      if ((!Array.isArray(it.stocks) || !it.stocks.length) && Array.isArray(old.stocks) && old.stocks.length) {
+        it.stocks = old.stocks;
+      }
+      if (old.chipTries && !it.chipTries) it.chipTries = old.chipTries;
+    }
+
     // 合併保留 15 天
     const merged = mergeNews(newItems, oldItems, HOT_SECTOR_KEEP_DAYS);
+
+    // chip 補爬：對合併後仍缺 chip 的補抓，跟著下面同一次 KV 寫入、零額外寫入
+    if (mapReady) await refillChips(merged, codeNameMap);
 
     // 寫入 KV，TTL 16 天
     const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 16);
@@ -433,7 +493,7 @@ async function updateSectorNews() {
         it.src === "富聯網" &&
         /^https?:\/\//.test(it.link || "") &&
         (Date.now() - new Date(it.pub).getTime()) < PUSH_WINDOW_MS
-      );
+      ).sort((a, b) => new Date(a.pub) - new Date(b.pub)); // 同批按發稿時間先舊後新推，TG 由上往下讀才順
       for (const item of toPush) {
         await sendTelegram(formatSectorTg(item));
         await new Promise(r => setTimeout(r, 400)); // 間隔避免 TG 限流
