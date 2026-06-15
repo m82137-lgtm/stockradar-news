@@ -23,7 +23,7 @@ const KV_API = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/s
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-const HOT_SECTOR_KEEP_DAYS = 15;
+const HOT_SECTOR_KEEP_DAYS = 30;
 
 function now() {
   return new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
@@ -434,7 +434,7 @@ async function updateSectorNews() {
       if (mapReady) {
         const gained = await refillChips(oldItems, codeNameMap);
         if (gained) {
-          const ok2 = await kvPut('sectors', oldItems, 60 * 60 * 24 * 16);
+          const ok2 = await kvPut('sectors', oldItems, 60 * 60 * 24 * 31);
           console.log(`熱門族群：無新新聞，chip補爬回寫 ${gained} 則，寫入KV ${ok2 ? '✅' : '❌'}`);
           return;
         }
@@ -481,7 +481,7 @@ async function updateSectorNews() {
     if (mapReady) await refillChips(merged, codeNameMap);
 
     // 寫入 KV，TTL 16 天
-    const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 16);
+    const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 31);
     console.log(`熱門族群：${freshItems.length} 則新，合計 ${merged.length} 則，寫入KV ${ok ? '✅' : '❌'}`);
 
     // ── TG 推播：KV 寫入成功後，只推這次新進、且來源為富聯網的（連結乾淨可點）──
@@ -509,7 +509,7 @@ async function updateSectorNews() {
 // ── 台股新聞（鉅亨網）：搬自 Worker，每5分鐘抓 → 有新才寫 KV 'news' ──
 // 前端鉅亨認的格式是 {title, url, time, cat, ts}，用 url/ts 自己一套去重
 // （不共用熱門族群的 mergeNews，因為那套找 item.pub，鉅亨是 ts，硬套會把新聞全過濾掉）
-const CNYES_KEEP_DAYS = 7;
+const CNYES_KEEP_DAYS = 15;
 const CNYES_MAX = 300;
 
 function cnyesKey(n) { return n.url || (n.title || '').trim(); }
@@ -569,7 +569,7 @@ async function updateTwNews() {
       console.log('台股新聞：無新新聞，跳過寫入');
       return;
     }
-    const ok = await kvPut('news', merged, 60 * 60 * 24 * 8);
+    const ok = await kvPut('news', merged, 60 * 60 * 24 * 16);
     console.log(`台股新聞：${newItems.length} 則候選，合計 ${merged.length}，寫入KV ${ok ? '✅' : '❌'}`);
   } catch (e) {
     console.error('updateTwNews error:', e.message);
