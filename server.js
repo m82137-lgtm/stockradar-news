@@ -643,7 +643,12 @@ app.get("/api/stock-news", async (req, res) => {
     return res.json([{ time: now(), keyword: "", items: [] }]);
   }
 
-  const searches = [name, `${name} ${code}`, code].filter(q => q.trim());
+  // 砍掉「純股名」那組（同名詞雜訊大本營，如「全新」會撈到全新EP/全新登台）。
+  // 改用「股名 股號」+「純股號」兩組，都要求含股號，雜訊在搜尋階段就被擋掉。
+  // name 為空（純股號查詢）時，第一組為空字串被濾掉，等同只搜股號。
+  const searches = [...new Set(
+    [name && code ? `${name} ${code}` : '', code].filter(q => q.trim())
+  )];
   let allItems = [];
 
   for (const q of searches) {
