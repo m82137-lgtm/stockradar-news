@@ -889,6 +889,7 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     const themeRaw = await callGemini(themePrompt);
     await new Promise(res => setTimeout(res, 4000));
     const tagRaw = await callGemini(tagPrompt);
+    await new Promise(res => setTimeout(res, 4000));
 
     // 解析題材卡片 + 算族群漲跌幅
     let themeCards = [];
@@ -903,9 +904,30 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     }
     const tags = parseGeminiJson(tagRaw) || {};
 
-    const analysis = { ok: true, date, updatedAt: Date.now(), themeCards, tags };
+    // ── 第三批：新進榜「發生了什麼」（Gemini + Google搜尋查即時事件）──
+    const newcomers = top50.filter(s => s.isNew);
+    let newcomerCards = [];
+    if (newcomers.length) {
+      const ncList = newcomers.map(s => `${s.code}(${s.name}) 漲跌${s.chg>0?'+':''}${s.chg}%`).join('\n');
+      const ncPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。以下是今日「首次衝進美股成交值前50名」的個股。請用 Google 搜尋查出每一檔「今天為什麼爆量上榜」的具體原因（財報、併購、消息、產業事件等），各寫一句話(40字內)。若查無明確個股消息，就寫「近期無明確個股消息，可能受族群輪動帶動」。
+只輸出 JSON 陣列：[{"code":"代碼","event":"發生了什麼的說明"}]
+不要其他文字、不要markdown框。
+新進榜個股：
+${ncList}`;
+      const ncRaw = await callGemini(ncPrompt, true);   // true = 開 Google 搜尋
+      const ncArr = parseGeminiJson(ncRaw);
+      const eventMap = {};
+      if (Array.isArray(ncArr)) ncArr.forEach(x => { if (x.code) eventMap[x.code] = x.event || ''; });
+      newcomerCards = newcomers.map(s => ({
+        code: s.code, name: s.name, chg: s.chg,
+        tag: tags[s.code] || '',
+        event: eventMap[s.code] || '近期無明確個股消息，可能受族群輪動帶動。',
+      }));
+    }
+
+    const analysis = { ok: true, date, updatedAt: Date.now(), themeCards, tags, newcomerCards };
     await kvPut("us_analysis", analysis, 86400 * 3);
-    console.log(`美股AI分析：題材${themeCards.length}組、標籤${Object.keys(tags).length}檔`);
+    console.log(`美股AI分析：題材${themeCards.length}組、標籤${Object.keys(tags).length}檔、新進榜${newcomerCards.length}檔`);
   } catch (e) {
     console.error("buildUsAnalysis error:", e.message);
   }
