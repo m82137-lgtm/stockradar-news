@@ -629,6 +629,12 @@ cron.schedule("*/5 * * * *", async () => {
   await updateTwNews();   // 台股新聞（鉅亨）：搬自 Worker，每5分鐘抓→有新才寫 KV
 });
 
+// 美股 Top50：每天台北 13:30（UTC 5:30）抓 Polygon 建榜→寫 KV
+// （比照原版：免費源於美股收盤後隔日才穩，故下午抓前一交易日收盤）
+cron.schedule("30 5 * * *", async () => {
+  await buildUsTop50();
+});
+
 // 健康檢查（UptimeRobot ping 用）
 app.get("/", (req, res) => {
   res.send("stockradar-news running");
@@ -704,6 +710,141 @@ app.get("/api/otc-daily", async (req, res) => {
     res.json(result);
   } catch (e) {
     console.error("/api/otc-daily error:", e.message);
+    res.status(500).json({ ok: false, error: e.message, data: [] });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  美股成交值 Top50（Polygon / Massive）
+//  流程：① type=CS 撈個股白名單（快取一天）② grouped daily 撈全市場
+//        ③ 只留白名單內的、濾掉 ETF/SPAC/特別股/債/權證
+//        ④ 算成交金額(vw×v)、漲跌幅(撈前一交易日相減) → 排序取 Top50 → 寫 KV
+//  每天台北 13:30 由 cron 觸發（美股前一交易日收盤；免費源收盤後隔日才穩，故下午抓）
+// ══════════════════════════════════════════════════════════
+const POLYGON_KEY = process.env.POLYGON_KEY;
+const POLY_BASE   = "https://api.polygon.io";
+
+// 個股白名單快取（避免每天翻 5-6 頁；存代碼 Set + 名稱對照）
+let _csCache = { date: "", set: null, names: null };
+
+// 名稱關鍵字：含這些字的剔除（SPAC/特別股/債/權證/單位等非營運個股）
+const NON_STOCK_RE = /(Acquisition Corp|\bNotes\b|Preferred|Depositary|Warrant|\bUnits?\b|\bRight\b|Subordinated|Debenture)/i;
+
+// 取「前一美股交易日」的日期字串(YYYY-MM-DD)，用 UTC 推算避開時區/換日誤差
+function usPrevTradingDate(offsetDays = 1) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - offsetDays);
+  // 跳過週末（六=6、日=0）往前推到最近的平日
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// 抓 type=CS 個股白名單（跟著 next_url 翻頁，全部撈完）
+async function fetchUsStockWhitelist() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_csCache.date === today && _csCache.set) return _csCache;   // 當天已撈過，用快取
+
+  const set = new Set();
+  const names = {};
+  let url = `${POLY_BASE}/v3/reference/tickers?type=CS&market=stocks&active=true&limit=1000&apiKey=${POLYGON_KEY}`;
+  let pages = 0;
+  while (url && pages < 8) {   // 上限8頁保險（普通股約5-6千檔）
+    const r = await fetch(url);
+    if (!r.ok) break;
+    const j = await r.json();
+    for (const t of (j.results || [])) {
+      const name = t.name || "";
+      if (NON_STOCK_RE.test(name)) continue;          // 濾掉 SPAC/特別股/債/權證
+      set.add(t.ticker);
+      names[t.ticker] = name;
+    }
+    pages++;
+    url = j.next_url ? `${j.next_url}&apiKey=${POLYGON_KEY}` : null;
+  }
+  _csCache = { date: today, set, names };
+  console.log(`美股白名單(type=CS)：${set.size} 檔，翻 ${pages} 頁`);
+  return _csCache;
+}
+
+// 抓某日 grouped daily 全市場（回 Map: ticker -> {c,vw,v...}）
+async function fetchGroupedDaily(date) {
+  const url = `${POLY_BASE}/v2/aggs/grouped/locale/us/market/stocks/${date}?adjusted=true&apiKey=${POLYGON_KEY}`;
+  const r = await fetch(url);
+  if (!r.ok) return { ok: false, status: r.status, count: 0, map: new Map() };
+  const j = await r.json();
+  const map = new Map();
+  for (const row of (j.results || [])) map.set(row.T, row);
+  return { ok: true, count: (j.results || []).length, map };
+}
+
+// 主流程：算 Top50
+async function buildUsTop50() {
+  if (!POLYGON_KEY) return { ok: false, error: "POLYGON_KEY 未設定", data: [] };
+  try {
+    const wl = await fetchUsStockWhitelist();
+
+    // 撈當天；若空(8點前/未打包)退一天，最多退4天找到有資料的盤
+    let date = usPrevTradingDate(1), grouped = null;
+    for (let i = 0; i < 4; i++) {
+      grouped = await fetchGroupedDaily(date);
+      if (grouped.ok && grouped.count > 100) break;
+      date = usPrevTradingDate(i + 2);
+    }
+    if (!grouped || !grouped.ok || grouped.count <= 100) {
+      return { ok: false, error: "Polygon grouped 無資料", data: [] };
+    }
+
+    // 前一交易日（算漲跌幅用）
+    const prevDateGuess = usPrevTradingDate(2);
+    const prev = await fetchGroupedDaily(prevDateGuess);
+
+    // 組裝：只留白名單內的個股，算成交值與漲跌幅
+    const rows = [];
+    for (const [ticker, d] of grouped.map) {
+      if (!wl.set.has(ticker)) continue;            // 非個股(ETF/SPAC等)跳過
+      const close = d.c || 0;
+      const vol   = d.v || 0;
+      const vwap  = d.vw || close;
+      if (close <= 0 || vol <= 0) continue;
+      const dollarVol = vwap * vol;                 // 成交金額 = 成交均價 × 量
+      let chgPct = 0;
+      const p = prev.ok ? prev.map.get(ticker) : null;
+      if (p && p.c > 0) chgPct = ((close - p.c) / p.c) * 100;
+      rows.push({
+        code: ticker,
+        name: wl.names[ticker] || ticker,
+        price: Math.round(close * 100) / 100,
+        chg: Math.round(chgPct * 100) / 100,
+        dollarVol: Math.round(dollarVol),
+        vol,
+      });
+    }
+
+    rows.sort((a, b) => b.dollarVol - a.dollarVol);
+    const top50 = rows.slice(0, 50).map((s, i) => ({ rank: i + 1, ...s }));
+
+    const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
+    await kvPut("us_top50", result, 86400 * 3);     // 寫 KV，保留3天
+    console.log(`美股Top50：date=${date} 共${top50.length}檔（白名單${wl.set.size}/全市場${grouped.count}）`);
+    return result;
+  } catch (e) {
+    console.error("buildUsTop50 error:", e.message);
+    return { ok: false, error: e.message, data: [] };
+  }
+}
+
+// endpoint：前端 fetch。先讀 KV(快)，沒有才現抓
+app.get("/api/us-top50", async (req, res) => {
+  try {
+    const cached = await kvGet("us_top50");
+    if (cached && cached.ok && Array.isArray(cached.data) && cached.data.length) {
+      return res.json(cached);
+    }
+    const fresh = await buildUsTop50();
+    if (!fresh.ok) return res.status(502).json(fresh);
+    res.json(fresh);
+  } catch (e) {
+    console.error("/api/us-top50 error:", e.message);
     res.status(500).json({ ok: false, error: e.message, data: [] });
   }
 });
