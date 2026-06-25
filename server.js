@@ -978,10 +978,14 @@ ${newsTxt}`;
 相關新聞：
 ${newsTxt}`;
 
-    const themePrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。根據以下美股${date}成交值前15名，把它們歸納成2-4個「今日發動題材／族群」（例如：AI半導體、記憶體、電動車、太空、金融等），依熱度排序。每個題材格式：「**題材名**：成員股代碼列表 — 一句話說明今日表現」。只輸出題材分析，不要前言、不要免責。
+    const themePrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。根據以下美股${date}成交值前20名，歸納成3-6個「今日發動題材／族群」（例如：AI半導體、記憶體、電動車、太空、雲端、金融、減肥藥等），依資金熱度排序。
 
-成交值前15：
-${top15txt}`;
+只輸出 JSON 陣列，格式：
+[{"name":"題材名","codes":["代碼1","代碼2"],"desc":"一句話說明今日該族群表現與催化因素(30字內)"}]
+不要任何其他文字、不要markdown程式碼框。codes 只放下方清單裡有的代碼。
+
+成交值前20：
+${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n')}`;
 
     // 每檔題材分類：要 Gemini 回 JSON（代碼→簡短題材標籤），填進表格「題材」欄
     const allCodesTxt = top50.map(s => `${s.code}(${s.name})`).join('、');
@@ -994,8 +998,26 @@ ${top15txt}`;
     await new Promise(res => setTimeout(res, 4000));
     const newcomer = newcomers.length ? await callGemini(newcomerPrompt) : '今日無新進榜個股。';
     await new Promise(res => setTimeout(res, 4000));
-    const theme = await callGemini(themePrompt);
+    const themeRaw = await callGemini(themePrompt);
     await new Promise(res => setTimeout(res, 4000));
+
+    // 解析 theme JSON → 算每個題材的族群漲跌幅（成員股平均）
+    let themeCards = [];
+    if (themeRaw) {
+      try {
+        const cleaned = themeRaw.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const arr = JSON.parse(cleaned);
+        const priceMap = {};
+        top50.forEach(s => { priceMap[s.code] = s.chg; });
+        themeCards = (Array.isArray(arr) ? arr : []).map(t => {
+          const codes = (t.codes || []).filter(c => priceMap[c] !== undefined);
+          const avgChg = codes.length
+            ? codes.reduce((sum, c) => sum + (priceMap[c] || 0), 0) / codes.length
+            : 0;
+          return { name: t.name || '', codes, desc: t.desc || '', chg: Math.round(avgChg * 100) / 100 };
+        }).filter(t => t.name && t.codes.length);
+      } catch (e) { console.error("發動題材JSON解析失敗:", e.message); }
+    }
 
     // 每檔題材標籤（解析 Gemini 回的 JSON）
     let tags = {};
@@ -1004,14 +1026,14 @@ ${top15txt}`;
       try {
         const cleaned = tagRaw.replace(/```json/gi, '').replace(/```/g, '').trim();
         tags = JSON.parse(cleaned);
-      } catch (e) { console.error("題材JSON解析失敗:", e.message); }
+      } catch (e) { console.error("題材標籤JSON解析失敗:", e.message); }
     }
 
     const analysis = {
       ok: true, date, updatedAt: Date.now(),
       focus:    focus    || '（市場焦點生成失敗，稍後重試）',
       newcomer: newcomer || '（新進榜解讀生成失敗，稍後重試）',
-      theme:    theme    || '（發動題材生成失敗，稍後重試）',
+      themeCards,                                    // 發動題材卡片（結構化）
       tags,                                          // 每檔題材標籤 {代碼:標籤}
       newcomerCodes: newcomers.map(s => s.code),
     };
