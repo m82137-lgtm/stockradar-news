@@ -881,8 +881,11 @@ async function callGemini(prompt, useSearch = false, retries = 3) {
       if (r.status === 429) { await new Promise(res => setTimeout(res, 6000 * (attempt + 1))); continue; }
       if (!r.ok) { console.error("Gemini HTTP", r.status); return null; }
       const j = await r.json();
-      const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
-      return text ? text.trim() : null;
+      const parts = j?.candidates?.[0]?.content?.parts;
+      if (!Array.isArray(parts)) return null;
+      // 合併所有 parts 的 text（Google搜尋時回傳會拆成多個 part）
+      const text = parts.map(p => p?.text || '').join('\n').trim();
+      return text || null;
     } catch (e) { console.error("callGemini error:", e.message); return null; }
   }
   return null;
@@ -890,8 +893,16 @@ async function callGemini(prompt, useSearch = false, retries = 3) {
 
 function parseGeminiJson(raw) {
   if (!raw) return null;
-  try { return JSON.parse(raw.replace(/```json/gi, '').replace(/```/g, '').trim()); }
-  catch (e) { console.error("JSON解析失敗:", e.message); return null; }
+  let s = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+  // 直接解析
+  try { return JSON.parse(s); } catch (e) {}
+  // 從混雜文字中抽出第一個 JSON 陣列或物件（Google搜尋回傳常夾雜說明文字）
+  const arrMatch = s.match(/\[[\s\S]*\]/);
+  if (arrMatch) { try { return JSON.parse(arrMatch[0]); } catch (e) {} }
+  const objMatch = s.match(/\{[\s\S]*\}/);
+  if (objMatch) { try { return JSON.parse(objMatch[0]); } catch (e) {} }
+  console.error("JSON解析失敗:", s.slice(0, 100));
+  return null;
 }
 
 async function buildUsAnalysis(top50, date) {
@@ -935,15 +946,22 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     let newcomerCards = [];
     if (newcomers.length) {
       const ncList = newcomers.map(s => `${s.code}(${s.name}) 漲跌${s.chg>0?'+':''}${s.chg}%`).join('\n');
-      const ncPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。以下是今日「首次衝進美股成交值前50名」的個股。請用 Google 搜尋查出每一檔「今天為什麼爆量上榜」的具體原因（財報、併購、消息、產業事件等），各寫一句話(40字內)。若查無明確個股消息，就寫「近期無明確個股消息，可能受族群輪動帶動」。
-只輸出 JSON 陣列：[{"code":"代碼","event":"發生了什麼的說明"}]
-不要其他文字、不要markdown框。
-新進榜個股：
+      const ncPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。以下個股今天首次衝進美股成交值前50名、爆出大量。請用 Google 搜尋查出每一檔「最近這幾天股價為什麼大漲或大跌、為什麼爆量」的新聞原因（例如：財報、併購、分析師調評、產品發表、產業利多利空、政策、大客戶訂單等近期事件），不要查股票分割或股息這種無關的歷史資料。
+每檔寫一句話總結原因（35字內，繁體中文）。若真的查不到近期新聞，才寫「近期無明確個股消息，可能受族群輪動帶動」。
+輸出格式：只輸出一個 JSON 陣列，每個元素是 {"code":"代碼","event":"一句話原因字串"}。event 必須是純文字字串、不可以是物件或陣列。不要輸出 JSON 以外的任何文字。
+個股清單：
 ${ncList}`;
       const ncRaw = await callGemini(ncPrompt, true);   // true = 開 Google 搜尋
       const ncArr = parseGeminiJson(ncRaw);
       const eventMap = {};
-      if (Array.isArray(ncArr)) ncArr.forEach(x => { if (x.code) eventMap[x.code] = x.event || ''; });
+      if (Array.isArray(ncArr)) ncArr.forEach(x => {
+        if (x.code) {
+          // event 強制轉成字串（防 Gemini 回成物件/陣列）
+          let ev = x.event;
+          if (typeof ev !== 'string') ev = '';
+          eventMap[x.code] = ev;
+        }
+      });
       newcomerCards = newcomers.map(s => ({
         code: s.code, name: s.name, chg: s.chg,
         tag: tags[s.code] || '',
