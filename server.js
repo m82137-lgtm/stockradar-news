@@ -857,39 +857,57 @@ app.get("/api/us-top50", async (req, res) => {
 //  與行情解耦——行情先存好，分析失敗不影響表格顯示
 // ══════════════════════════════════════════════════════════
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL   = "gemini-2.0-flash";   // 穩定正式版、快、生短分析足夠
+const GEMINI_MODEL   = "gemini-2.5-flash";   // 現役正式版（2.0已於2026/3退役）；免費10 RPM / 1500 RPD
 
-// 呼叫 Gemini，回純文字（失敗回 null，不拋例外）
-async function callGemini(prompt) {
+// 呼叫 Gemini，回純文字（失敗回 null，不拋例外）。撞 429 自動退避重試
+async function callGemini(prompt, retries = 3) {
   if (!GEMINI_API_KEY) return null;
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
-      }),
-    });
-    if (!r.ok) { console.error("Gemini HTTP", r.status); return null; }
-    const j = await r.json();
-    const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text ? text.trim() : null;
-  } catch (e) {
-    console.error("callGemini error:", e.message);
-    return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+        }),
+      });
+      if (r.status === 429) {
+        // 撞速率限制：退避等待後重試（6s、12s、18s…）
+        const wait = 6000 * (attempt + 1);
+        console.warn(`Gemini 429，第${attempt+1}次退避 ${wait/1000}s`);
+        await new Promise(res => setTimeout(res, wait));
+        continue;
+      }
+      if (!r.ok) { console.error("Gemini HTTP", r.status); return null; }
+      const j = await r.json();
+      const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+      return text ? text.trim() : null;
+    } catch (e) {
+      console.error("callGemini error:", e.message);
+      return null;
+    }
   }
+  console.error("Gemini 429 重試耗盡");
+  return null;
 }
 
-// 抓某檔近期新聞（Polygon news，回標題陣列；失敗回空）
+// 抓某檔近期新聞（Polygon news，回 標題+摘要+情緒；失敗回空）
 async function fetchTickerNews(code, limit = 3) {
   try {
     const url = `${POLY_BASE}/v2/reference/news?ticker=${code}&limit=${limit}&apiKey=${POLYGON_KEY}`;
     const r = await fetch(url);
     if (!r.ok) return [];
     const j = await r.json();
-    return (j.results || []).map(n => n.title).filter(Boolean);
+    return (j.results || []).map(n => {
+      // 取這檔對應的情緒（Polygon 已標好利多/利空+理由）
+      const ins = (n.insights || []).find(i => i.ticker === code);
+      const senTxt = ins ? `[${ins.sentiment}] ${ins.sentiment_reasoning || ''}` : '';
+      // 標題 + 摘要(截斷) + 情緒理由，組成一條餵 Gemini 的素材
+      const desc = (n.description || '').slice(0, 200);
+      return [n.title, desc, senTxt].filter(Boolean).join(' ｜ ');
+    }).filter(Boolean);
   } catch { return []; }
 }
 
@@ -947,10 +965,12 @@ ${newsTxt}`;
 成交值前15：
 ${top15txt}`;
 
-    // ── 呼叫 Gemini（序列呼叫，避免並發；各自失敗不影響其他）──
-    const focus     = await callGemini(focusPrompt);
-    const newcomer  = newcomers.length ? await callGemini(newcomerPrompt) : '今日無新進榜個股。';
-    const theme     = await callGemini(themePrompt);
+    // ── 呼叫 Gemini（序列+間隔，避免並發撞 10 RPM）──
+    const focus = await callGemini(focusPrompt);
+    await new Promise(res => setTimeout(res, 4000));
+    const newcomer = newcomers.length ? await callGemini(newcomerPrompt) : '今日無新進榜個股。';
+    await new Promise(res => setTimeout(res, 4000));
+    const theme = await callGemini(themePrompt);
 
     const analysis = {
       ok: true, date, updatedAt: Date.now(),
