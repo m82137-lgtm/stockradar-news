@@ -830,7 +830,89 @@ app.get("/api/us-rebuild", async (req, res) => {
   try {
     const r = await buildUsTop50();
     if (!r.ok) return res.status(502).json(r);
-    res.json({ ok: true, date: r.date, count: r.count, note: "行情已更新" });
+    buildUsAnalysis(r.data, r.date).catch(e => console.error("background analysis:", e.message));
+    res.json({ ok: true, date: r.date, count: r.count, note: "行情已更新，AI題材分析背景生成中" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── 美股 AI 分析（第二批：發動題材卡片 + 每檔題材標籤）──
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL   = "gemini-2.5-flash";
+
+async function callGemini(prompt, useSearch = false, retries = 3) {
+  if (!GEMINI_API_KEY) return null;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.7, maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } },
+  };
+  if (useSearch) body.tools = [{ google_search: {} }];   // 接 Google 搜尋（第三四批用）
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (r.status === 429) { await new Promise(res => setTimeout(res, 6000 * (attempt + 1))); continue; }
+      if (!r.ok) { console.error("Gemini HTTP", r.status); return null; }
+      const j = await r.json();
+      const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+      return text ? text.trim() : null;
+    } catch (e) { console.error("callGemini error:", e.message); return null; }
+  }
+  return null;
+}
+
+function parseGeminiJson(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw.replace(/```json/gi, '').replace(/```/g, '').trim()); }
+  catch (e) { console.error("JSON解析失敗:", e.message); return null; }
+}
+
+async function buildUsAnalysis(top50, date) {
+  if (!GEMINI_API_KEY) { console.log("美股AI：GEMINI_API_KEY 未設定，跳過"); return; }
+  try {
+    // 發動題材卡片（JSON：題材名+成員代碼+說明）
+    const themePrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。根據以下美股${date}成交值前20名，歸納成3-6個「今日發動題材／族群」（例如AI半導體、記憶體、電動車、太空、雲端、金融、減肥藥等），依資金熱度排序。
+只輸出 JSON 陣列：[{"name":"題材名","codes":["代碼1","代碼2"],"desc":"一句話說明今日該族群表現與催化因素(30字內)"}]
+不要其他文字、不要markdown框。codes只放下方有的代碼。
+成交值前20：
+${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n')}`;
+
+    // 每檔題材標籤（JSON：代碼→標籤）
+    const tagPrompt = `為以下美股個股各標一個「最貼切的中文題材標籤」(4-8字，如：AI晶片、記憶體、電動車、太空、雲端服務、減肥藥GLP-1、比特幣/加密、儲存裝置、消費性電子、半導體設備、串流媒體、航空、晶圓代工、社群媒體、支付服務 等)。
+只輸出JSON物件 {"代碼":"標籤",...}，不要其他文字、不要markdown框。
+個股：${top50.map(s=>`${s.code}(${s.name})`).join('、')}`;
+
+    const themeRaw = await callGemini(themePrompt);
+    await new Promise(res => setTimeout(res, 4000));
+    const tagRaw = await callGemini(tagPrompt);
+
+    // 解析題材卡片 + 算族群漲跌幅
+    let themeCards = [];
+    const arr = parseGeminiJson(themeRaw);
+    if (Array.isArray(arr)) {
+      const chgMap = {}; top50.forEach(s => { chgMap[s.code] = s.chg; });
+      themeCards = arr.map(t => {
+        const codes = (t.codes || []).filter(c => chgMap[c] !== undefined);
+        const avgChg = codes.length ? codes.reduce((sum, c) => sum + (chgMap[c] || 0), 0) / codes.length : 0;
+        return { name: t.name || '', codes, desc: t.desc || '', chg: Math.round(avgChg * 100) / 100 };
+      }).filter(t => t.name && t.codes.length);
+    }
+    const tags = parseGeminiJson(tagRaw) || {};
+
+    const analysis = { ok: true, date, updatedAt: Date.now(), themeCards, tags };
+    await kvPut("us_analysis", analysis, 86400 * 3);
+    console.log(`美股AI分析：題材${themeCards.length}組、標籤${Object.keys(tags).length}檔`);
+  } catch (e) {
+    console.error("buildUsAnalysis error:", e.message);
+  }
+}
+
+app.get("/api/us-analysis", async (req, res) => {
+  try {
+    const cached = await kvGet("us_analysis");
+    if (cached && cached.ok) return res.json(cached);
+    res.json({ ok: false, themeCards: [], tags: {} });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -838,7 +920,8 @@ app.get("/api/us-rebuild", async (req, res) => {
 
 // cron：每天台北13:30(UTC5:30)抓美股
 cron.schedule("30 5 * * *", async () => {
-  await buildUsTop50();
+  const r = await buildUsTop50();
+  if (r && r.ok && r.data && r.data.length) await buildUsAnalysis(r.data, r.date);
 });
 
 app.listen(PORT, async () => {
