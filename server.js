@@ -790,12 +790,18 @@ async function buildUsTop50() {
     rows.sort((a, b) => b.dollarVol - a.dollarVol);
     let top50 = rows.slice(0, 50).map((s, i) => ({ rank: i + 1, ...s }));
 
-    // 在榜天數 + 排名變化 + NEW（跟 us_history 比對）
+    // ── 在榜天數 + 排名變化 + NEW ──
+    // 新進榜判定：用「上一個交易日的 top50 快照」比對——今天有、昨天快照沒有的 = 新進榜
+    // 快照只在「日期變了」才更新（避免同一天 rebuild 多次自己跟自己比，導致新進榜永遠空）
+    const snap = (await kvGet("us_prev_top50")) || { date: "", codes: [] };
+    const prevCodes = new Set(snap.codes || []);
+    const isFirstRun = !snap.date;                  // 從沒有快照（第一次跑）
     const hist = (await kvGet("us_history")) || {};
     const newHist = {};
     top50 = top50.map(s => {
       const h = hist[s.code];
-      const isNew = !h;
+      // 新進榜：昨天快照沒有這檔（且非第一次跑，第一次無對照基準不標NEW）
+      const isNew = !isFirstRun && !prevCodes.has(s.code);
       const days = h ? (h.days || 1) + 1 : 1;
       const rankChange = h && h.lastRank ? (h.lastRank - s.rank) : 0;
       newHist[s.code] = { days, lastRank: s.rank, firstDate: h?.firstDate || date };
@@ -803,9 +809,15 @@ async function buildUsTop50() {
     });
     await kvPut("us_history", newHist, 86400 * 30);
 
+    // 更新「昨天快照」：只有當 KV 裡的快照日期 ≠ 今天，才把今天存成新快照
+    // （這樣同一天 rebuild 多次，快照維持「上一個交易日」，新進榜判定才穩定）
+    if (snap.date !== date) {
+      await kvPut("us_prev_top50", { date, codes: top50.map(s => s.code) }, 86400 * 7);
+    }
+
     const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
     await kvPut("us_top50", result, 86400 * 3);
-    console.log(`美股Top50：date=${date} 共${top50.length}檔`);
+    console.log(`美股Top50：date=${date} 共${top50.length}檔，新進榜${top50.filter(s=>s.isNew).length}檔`);
     return result;
   } catch (e) {
     console.error("buildUsTop50 error:", e.message);
@@ -832,6 +844,20 @@ app.get("/api/us-rebuild", async (req, res) => {
     if (!r.ok) return res.status(502).json(r);
     buildUsAnalysis(r.data, r.date).catch(e => console.error("background analysis:", e.message));
     res.json({ ok: true, date: r.date, count: r.count, note: "行情已更新，AI題材分析背景生成中" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 測試用：把「昨天快照」故意設成「今天榜去掉後10檔」，讓那10檔變新進榜（驗證新進榜功能）
+app.get("/api/us-test-newcomers", async (req, res) => {
+  try {
+    const cur = await kvGet("us_top50");
+    if (!cur || !cur.data) return res.json({ ok: false, error: "尚無 us_top50 資料，請先 us-rebuild" });
+    const codes = cur.data.map(s => s.code).slice(0, 40);   // 假裝昨天只有前40檔
+    // date 設成跟今天一樣，這樣 rebuild 時 snap.date===date 不會覆蓋掉這個測試快照
+    await kvPut("us_prev_top50", { date: cur.date, codes }, 86400 * 7);
+    res.json({ ok: true, note: "已設測試快照（昨天=前40檔）。現在打 /api/us-rebuild，第41-50名會變新進榜" });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
