@@ -870,7 +870,11 @@ async function callGemini(prompt, retries = 3) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 4096,
+            thinkingConfig: { thinkingBudget: 0 },   // 關閉thinking：生短分析不需要，省token避免截斷
+          },
         }),
       });
       if (r.status === 429) {
