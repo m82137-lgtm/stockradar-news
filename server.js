@@ -824,7 +824,21 @@ async function buildUsTop50() {
     }
 
     rows.sort((a, b) => b.dollarVol - a.dollarVol);
-    const top50 = rows.slice(0, 50).map((s, i) => ({ rank: i + 1, ...s }));
+    let top50 = rows.slice(0, 50).map((s, i) => ({ rank: i + 1, ...s }));
+
+    // ── 在榜天數 + 排名變化 + NEW（跟歷史記錄 us_history 比對）──
+    // us_history 格式：{ code: { days:在榜天數, lastRank:昨日排名, firstDate:首次進榜日 } }
+    const hist = (await kvGet("us_history")) || {};
+    const newHist = {};
+    top50 = top50.map(s => {
+      const h = hist[s.code];
+      const isNew = !h;                               // 歷史沒有=今天首次進榜
+      const days  = h ? (h.days || 1) + 1 : 1;        // 在榜天數累積（首日=1）
+      const rankChange = h && h.lastRank ? (h.lastRank - s.rank) : 0;  // 正=排名上升
+      newHist[s.code] = { days, lastRank: s.rank, firstDate: h?.firstDate || date };
+      return { ...s, days, isNew, rankChange };
+    });
+    await kvPut("us_history", newHist, 86400 * 30);   // 歷史保留30天（只留今天在榜的，掉榜即重置）
 
     const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
     await kvPut("us_top50", result, 86400 * 3);     // 寫 KV，保留3天
@@ -969,18 +983,36 @@ ${newsTxt}`;
 成交值前15：
 ${top15txt}`;
 
+    // 每檔題材分類：要 Gemini 回 JSON（代碼→簡短題材標籤），填進表格「題材」欄
+    const allCodesTxt = top50.map(s => `${s.code}(${s.name})`).join('、');
+    const tagPrompt = `你是美股分析師。請為以下美股個股各標一個「最貼切的中文題材／族群標籤」（4-8字，例如：AI晶片、記憶體、電動車、太空、雲端服務、減肥藥GLP-1、比特幣/加密、儲存裝置、消費性電子、半導體設備、串流媒體、航空、燃料電池、電力基礎建設、光纖通訊 等）。只輸出 JSON 物件，格式 {"代碼":"題材標籤",...}，不要任何其他文字、不要markdown程式碼框。
+
+個股：${allCodesTxt}`;
+
     // ── 呼叫 Gemini（序列+間隔，避免並發撞 10 RPM）──
     const focus = await callGemini(focusPrompt);
     await new Promise(res => setTimeout(res, 4000));
     const newcomer = newcomers.length ? await callGemini(newcomerPrompt) : '今日無新進榜個股。';
     await new Promise(res => setTimeout(res, 4000));
     const theme = await callGemini(themePrompt);
+    await new Promise(res => setTimeout(res, 4000));
+
+    // 每檔題材標籤（解析 Gemini 回的 JSON）
+    let tags = {};
+    const tagRaw = await callGemini(tagPrompt);
+    if (tagRaw) {
+      try {
+        const cleaned = tagRaw.replace(/```json/gi, '').replace(/```/g, '').trim();
+        tags = JSON.parse(cleaned);
+      } catch (e) { console.error("題材JSON解析失敗:", e.message); }
+    }
 
     const analysis = {
       ok: true, date, updatedAt: Date.now(),
       focus:    focus    || '（市場焦點生成失敗，稍後重試）',
       newcomer: newcomer || '（新進榜解讀生成失敗，稍後重試）',
       theme:    theme    || '（發動題材生成失敗，稍後重試）',
+      tags,                                          // 每檔題材標籤 {代碼:標籤}
       newcomerCodes: newcomers.map(s => s.code),
     };
     await kvPut("us_analysis", analysis, 86400 * 3);
