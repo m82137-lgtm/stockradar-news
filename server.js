@@ -632,7 +632,10 @@ cron.schedule("*/5 * * * *", async () => {
 // 美股 Top50：每天台北 13:30（UTC 5:30）抓 Polygon 建榜→寫 KV
 // （比照原版：免費源於美股收盤後隔日才穩，故下午抓前一交易日收盤）
 cron.schedule("30 5 * * *", async () => {
-  await buildUsTop50();
+  const r = await buildUsTop50();
+  if (r && r.ok && r.data && r.data.length) {
+    await buildUsAnalysis(r.data, r.date);   // 行情建好後接著生 Gemini 分析
+  }
 });
 
 // 健康檢查（UptimeRobot ping 用）
@@ -846,6 +849,148 @@ app.get("/api/us-top50", async (req, res) => {
   } catch (e) {
     console.error("/api/us-top50 error:", e.message);
     res.status(500).json({ ok: false, error: e.message, data: [] });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
+//  美股 AI 分析（Gemini）：市場焦點 / 新進榜雷達 / 發動題材
+//  與行情解耦——行情先存好，分析失敗不影響表格顯示
+// ══════════════════════════════════════════════════════════
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL   = "gemini-2.0-flash";   // 穩定正式版、快、生短分析足夠
+
+// 呼叫 Gemini，回純文字（失敗回 null，不拋例外）
+async function callGemini(prompt) {
+  if (!GEMINI_API_KEY) return null;
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+      }),
+    });
+    if (!r.ok) { console.error("Gemini HTTP", r.status); return null; }
+    const j = await r.json();
+    const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return text ? text.trim() : null;
+  } catch (e) {
+    console.error("callGemini error:", e.message);
+    return null;
+  }
+}
+
+// 抓某檔近期新聞（Polygon news，回標題陣列；失敗回空）
+async function fetchTickerNews(code, limit = 3) {
+  try {
+    const url = `${POLY_BASE}/v2/reference/news?ticker=${code}&limit=${limit}&apiKey=${POLYGON_KEY}`;
+    const r = await fetch(url);
+    if (!r.ok) return [];
+    const j = await r.json();
+    return (j.results || []).map(n => n.title).filter(Boolean);
+  } catch { return []; }
+}
+
+// 主流程：算新進榜 + 抓新聞 + 呼叫 Gemini 生成 3 區塊，存 KV
+async function buildUsAnalysis(top50, date) {
+  if (!GEMINI_API_KEY) { console.log("美股AI：GEMINI_API_KEY 未設定，跳過"); return; }
+  try {
+    // ── 新進榜：跟昨天榜單比，找今天首次進前50的 ──
+    const prevSnap = await kvGet("us_top50_prev");
+    const prevCodes = new Set((prevSnap?.codes) || []);
+    const todayCodes = top50.map(s => s.code);
+    const newcomers = prevCodes.size
+      ? top50.filter(s => !prevCodes.has(s.code))
+      : [];   // 第一天沒有昨天資料，新進榜留空
+    // 存今天榜單給明天比對
+    await kvPut("us_top50_prev", { date, codes: todayCodes }, 86400 * 5);
+
+    // ── 抓新聞：成交值全 50 檔 + 新進榜，去重（cron 背景慢慢掃，約11分鐘）──
+    const allCodes = top50.map(s => s.code);
+    const newsTargets = [...new Set([...allCodes, ...newcomers.map(s=>s.code)])];
+    const newsMap = {};
+    for (const code of newsTargets) {
+      const titles = await fetchTickerNews(code, 3);
+      if (titles.length) newsMap[code] = titles;
+      await new Promise(res => setTimeout(res, 13000));   // 間隔13秒，守住免費5次/分上限
+    }
+
+    // ── 準備餵 Gemini 的素材 ──
+    const top15txt = top50.slice(0, 15).map(s =>
+      `${s.rank}. ${s.code}(${s.name}) 收$${s.price} 漲跌${s.chg>0?'+':''}${s.chg}% 成交額$${(s.dollarVol/1e9).toFixed(1)}B`
+    ).join('\n');
+    const newsTxt = Object.entries(newsMap).map(([c, ts]) => `${c}: ${ts.join(' / ')}`).join('\n') || '（無新聞資料）';
+    const newcomerTxt = newcomers.length
+      ? newcomers.map(s => `${s.code}(${s.name}) 漲跌${s.chg>0?'+':''}${s.chg}%`).join('、')
+      : '（今日無新進榜，或首次執行尚無對照基準）';
+
+    // ── 3 個 prompt（繁中、台股投資人口吻、簡潔）──
+    const focusPrompt = `你是美股市場分析師，用繁體中文、台灣投資人習慣的口吻，根據以下「美股${date}成交值前15名」資料與相關新聞，寫一段約150字的「今日市場焦點」總結。點出今日資金集中在哪些族群、整體氣氛偏多或偏空、有無特別異動。只輸出總結本文，不要標題、不要條列、不要免責聲明。
+
+成交值前15：
+${top15txt}
+
+相關新聞：
+${newsTxt}`;
+
+    const newcomerPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。以下是今日「首次進入成交值前50名」的個股，請針對每一檔用1-2句話解讀「為何今天爆量上榜」（結合提供的新聞；若無新聞則從漲跌幅與所屬產業合理推測，並註明為推測）。每檔格式：「**代碼 公司**：說明」。只輸出解讀，不要前言、不要免責。
+
+新進榜個股：${newcomerTxt}
+
+相關新聞：
+${newsTxt}`;
+
+    const themePrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。根據以下美股${date}成交值前15名，把它們歸納成2-4個「今日發動題材／族群」（例如：AI半導體、記憶體、電動車、太空、金融等），依熱度排序。每個題材格式：「**題材名**：成員股代碼列表 — 一句話說明今日表現」。只輸出題材分析，不要前言、不要免責。
+
+成交值前15：
+${top15txt}`;
+
+    // ── 呼叫 Gemini（序列呼叫，避免並發；各自失敗不影響其他）──
+    const focus     = await callGemini(focusPrompt);
+    const newcomer  = newcomers.length ? await callGemini(newcomerPrompt) : '今日無新進榜個股。';
+    const theme     = await callGemini(themePrompt);
+
+    const analysis = {
+      ok: true, date, updatedAt: Date.now(),
+      focus:    focus    || '（市場焦點生成失敗，稍後重試）',
+      newcomer: newcomer || '（新進榜解讀生成失敗，稍後重試）',
+      theme:    theme    || '（發動題材生成失敗，稍後重試）',
+      newcomerCodes: newcomers.map(s => s.code),
+    };
+    await kvPut("us_analysis", analysis, 86400 * 3);
+    console.log(`美股AI分析：focus=${!!focus} newcomer=${newcomers.length}檔 theme=${!!theme}`);
+  } catch (e) {
+    console.error("buildUsAnalysis error:", e.message);
+  }
+}
+
+// AI 分析 endpoint：前端讀 KV
+app.get("/api/us-analysis", async (req, res) => {
+  try {
+    const cached = await kvGet("us_analysis");
+    if (cached && cached.ok) return res.json(cached);
+    res.json({ ok: false, focus: '', newcomer: '', theme: '' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 手動觸發：重抓行情+背景生成AI分析（測試用，不用等13:30 cron）
+// 非阻塞——立即回應，AI分析在背景慢慢跑（抓50檔新聞約11分鐘），完成後存KV
+app.get("/api/us-rebuild", async (req, res) => {
+  try {
+    const r = await buildUsTop50();   // 行情快，先同步跑完
+    if (!r.ok) return res.status(502).json(r);
+    // AI分析背景跑，不等它（避免HTTP timeout）
+    buildUsAnalysis(r.data, r.date).catch(e => console.error("background analysis:", e.message));
+    res.json({
+      ok: true, date: r.date, count: r.count,
+      note: "行情已更新。AI分析在背景生成中（抓全50檔新聞約11分鐘），完成後可讀 /api/us-analysis 查看。",
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
