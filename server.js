@@ -708,6 +708,139 @@ app.get("/api/otc-daily", async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════
+//  美股成交值 Top50（Polygon）— 第一批：行情+在榜天數+排名變化+NEW
+//  每天台北 13:30(UTC5:30) cron 抓 Polygon 前一交易日收盤 → 算榜 → 寫 KV
+// ══════════════════════════════════════════════════════════
+const POLYGON_KEY = process.env.POLYGON_KEY;
+const POLY_BASE   = "https://api.polygon.io";
+let _csCache = { date: "", set: null, names: null };
+const NON_STOCK_RE = /(Acquisition Corp|\bNotes\b|Preferred|Depositary|Warrant|\bUnits?\b|\bRight\b|Subordinated|Debenture)/i;
+
+function usPrevTradingDate(offsetDays = 1) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - offsetDays);
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+async function fetchUsStockWhitelist() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_csCache.date === today && _csCache.set) return _csCache;
+  const set = new Set(); const names = {};
+  let url = `${POLY_BASE}/v3/reference/tickers?type=CS&market=stocks&active=true&limit=1000&apiKey=${POLYGON_KEY}`;
+  let pages = 0;
+  while (url && pages < 8) {
+    const r = await fetch(url);
+    if (!r.ok) break;
+    const j = await r.json();
+    for (const t of (j.results || [])) {
+      const name = t.name || "";
+      if (NON_STOCK_RE.test(name)) continue;
+      set.add(t.ticker); names[t.ticker] = name;
+    }
+    pages++;
+    url = j.next_url ? `${j.next_url}&apiKey=${POLYGON_KEY}` : null;
+  }
+  _csCache = { date: today, set, names };
+  console.log(`美股白名單(type=CS)：${set.size} 檔`);
+  return _csCache;
+}
+
+async function fetchGroupedDaily(date) {
+  const url = `${POLY_BASE}/v2/aggs/grouped/locale/us/market/stocks/${date}?adjusted=true&apiKey=${POLYGON_KEY}`;
+  const r = await fetch(url);
+  if (!r.ok) return { ok: false, status: r.status, count: 0, map: new Map() };
+  const j = await r.json();
+  const map = new Map();
+  for (const row of (j.results || [])) map.set(row.T, row);
+  return { ok: true, count: (j.results || []).length, map };
+}
+
+async function buildUsTop50() {
+  if (!POLYGON_KEY) return { ok: false, error: "POLYGON_KEY 未設定", data: [] };
+  try {
+    const wl = await fetchUsStockWhitelist();
+    let date = usPrevTradingDate(1), grouped = null;
+    for (let i = 0; i < 4; i++) {
+      grouped = await fetchGroupedDaily(date);
+      if (grouped.ok && grouped.count > 100) break;
+      date = usPrevTradingDate(i + 2);
+    }
+    if (!grouped || !grouped.ok || grouped.count <= 100) return { ok: false, error: "Polygon grouped 無資料", data: [] };
+
+    const prevDateGuess = usPrevTradingDate(2);
+    const prev = await fetchGroupedDaily(prevDateGuess);
+
+    const rows = [];
+    for (const [ticker, d] of grouped.map) {
+      if (!wl.set.has(ticker)) continue;
+      const close = d.c || 0, vol = d.v || 0, vwap = d.vw || close;
+      if (close <= 0 || vol <= 0) continue;
+      let chgPct = 0;
+      const p = prev.ok ? prev.map.get(ticker) : null;
+      if (p && p.c > 0) chgPct = ((close - p.c) / p.c) * 100;
+      rows.push({
+        code: ticker, name: wl.names[ticker] || ticker,
+        price: Math.round(close * 100) / 100,
+        chg: Math.round(chgPct * 100) / 100,
+        dollarVol: Math.round(vwap * vol), vol,
+      });
+    }
+    rows.sort((a, b) => b.dollarVol - a.dollarVol);
+    let top50 = rows.slice(0, 50).map((s, i) => ({ rank: i + 1, ...s }));
+
+    // 在榜天數 + 排名變化 + NEW（跟 us_history 比對）
+    const hist = (await kvGet("us_history")) || {};
+    const newHist = {};
+    top50 = top50.map(s => {
+      const h = hist[s.code];
+      const isNew = !h;
+      const days = h ? (h.days || 1) + 1 : 1;
+      const rankChange = h && h.lastRank ? (h.lastRank - s.rank) : 0;
+      newHist[s.code] = { days, lastRank: s.rank, firstDate: h?.firstDate || date };
+      return { ...s, days, isNew, rankChange };
+    });
+    await kvPut("us_history", newHist, 86400 * 30);
+
+    const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
+    await kvPut("us_top50", result, 86400 * 3);
+    console.log(`美股Top50：date=${date} 共${top50.length}檔`);
+    return result;
+  } catch (e) {
+    console.error("buildUsTop50 error:", e.message);
+    return { ok: false, error: e.message, data: [] };
+  }
+}
+
+app.get("/api/us-top50", async (req, res) => {
+  try {
+    const cached = await kvGet("us_top50");
+    if (cached && cached.ok && Array.isArray(cached.data) && cached.data.length) return res.json(cached);
+    const fresh = await buildUsTop50();
+    if (!fresh.ok) return res.status(502).json(fresh);
+    res.json(fresh);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, data: [] });
+  }
+});
+
+// 手動觸發（測試用，非阻塞）
+app.get("/api/us-rebuild", async (req, res) => {
+  try {
+    const r = await buildUsTop50();
+    if (!r.ok) return res.status(502).json(r);
+    res.json({ ok: true, date: r.date, count: r.count, note: "行情已更新" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// cron：每天台北13:30(UTC5:30)抓美股
+cron.schedule("30 5 * * *", async () => {
+  await buildUsTop50();
+});
+
 app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
   await updateSectorNews();
