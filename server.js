@@ -1028,6 +1028,28 @@ ${ncList}`;
     const analysis = { ok: true, date, updatedAt: Date.now(), marketFocus, themeCards, tags, newcomerCards };
     await kvPut("us_analysis", analysis, 86400 * 3);
     console.log(`美股AI分析：焦點(已發生${marketFocus.happened.length}/即將${marketFocus.upcoming.length})、題材${themeCards.length}組、標籤${Object.keys(tags).length}檔、新進榜${newcomerCards.length}檔`);
+
+    // ── 第五批：存當天完整快照（top50 + analysis 合一）+ 維護日期清單 ──
+    try {
+      const top50full = await kvGet("us_top50");
+      const snapshot = {
+        ok: true, date,
+        data: (top50full && top50full.data) ? top50full.data : top50,
+        updatedAt: top50full ? top50full.updatedAt : Date.now(),
+        marketFocus, themeCards, tags, newcomerCards,
+      };
+      await kvPut(`us_snapshot_${date}`, snapshot, 86400 * 60);   // 快照保留60天
+      // 更新日期清單（最新在前、去重、最多保留60筆）
+      let dates = (await kvGet("us_snapshot_dates")) || [];
+      if (!Array.isArray(dates)) dates = [];
+      if (!dates.includes(date)) dates.unshift(date);
+      dates.sort((a, b) => b.localeCompare(a));      // 日期字串降冪=最新在前
+      dates = dates.slice(0, 60);
+      await kvPut("us_snapshot_dates", dates, 86400 * 60);
+      console.log(`美股快照已存：us_snapshot_${date}，目前共${dates.length}天歷史`);
+    } catch (e) {
+      console.error("存美股快照失敗:", e.message);
+    }
   } catch (e) {
     console.error("buildUsAnalysis error:", e.message);
   }
@@ -1038,6 +1060,35 @@ app.get("/api/us-analysis", async (req, res) => {
     const cached = await kvGet("us_analysis");
     if (cached && cached.ok) return res.json(cached);
     res.json({ ok: false, themeCards: [], tags: {} });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 第五批：可選的歷史日期清單（最新在前）
+app.get("/api/us-dates", async (req, res) => {
+  try {
+    let dates = (await kvGet("us_snapshot_dates")) || [];
+    if (!Array.isArray(dates)) dates = [];
+    // 保險：若清單空但有當前資料，至少回今天那天
+    if (!dates.length) {
+      const cur = await kvGet("us_top50");
+      if (cur && cur.date) dates = [cur.date];
+    }
+    res.json({ ok: true, dates });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, dates: [] });
+  }
+});
+
+// 第五批：讀某一天的完整快照（top50 + 分析合一）
+app.get("/api/us-snapshot", async (req, res) => {
+  try {
+    const date = (req.query.date || "").slice(0, 10);
+    if (!date) return res.status(400).json({ ok: false, error: "缺少 date 參數" });
+    const snap = await kvGet(`us_snapshot_${date}`);
+    if (snap && snap.ok) return res.json(snap);
+    res.status(404).json({ ok: false, error: `查無 ${date} 的快照` });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
