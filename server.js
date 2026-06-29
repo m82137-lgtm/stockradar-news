@@ -961,6 +961,42 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     }
     const tags = parseGeminiJson(tagRaw) || {};
 
+    // ── 第四批：市場焦點雙欄（Gemini + Google搜尋查當天美股大事 + 即將到來）──
+    await new Promise(res => setTimeout(res, 4000));
+    let marketFocus = { summary: '', happened: [], upcoming: [] };
+    const top10txt = top50.slice(0, 10).map(s => `${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n');
+    const focusPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。請用 Google 搜尋查「美股最近一個交易日(${date})的整體盤勢與重大事件」，以及「接下來幾天即將發生的重要事件」。參考當天成交值前10名：
+${top10txt}
+
+請輸出一個 JSON 物件，格式如下：
+{
+  "summary": "一段話總結今天美股整體盤勢(70字內，提到資金流向、領漲領跌族群、大盤氛圍)",
+  "happened": [
+    {"title": "已發生事件標題(15字內)", "desc": "事件說明(40字內)", "date": "事件日期如6/25或今天"}
+  ],
+  "upcoming": [
+    {"title": "即將到來事件標題(15字內)", "desc": "事件說明(40字內)", "date": "預計日期如6/27或本週四"}
+  ]
+}
+規則：
+1. happened 列 3-4 則「最近已經發生」的美股重大事件(財報、Fed利率、經濟數據、產業大事、個股大新聞等)，用 Google 搜尋查真實的近期新聞。
+2. upcoming 列 2-3 則「接下來幾天即將發生」的事件(即將公布的財報、即將開的會議、即將出的數據等)。
+3. 全部用繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
+
+    const focusRaw = await callGemini(focusPrompt, true);   // true = 開 Google 搜尋
+    const focusObj = parseGeminiJson(focusRaw);
+    if (focusObj && typeof focusObj === 'object') {
+      marketFocus = {
+        summary: typeof focusObj.summary === 'string' ? focusObj.summary : '',
+        happened: Array.isArray(focusObj.happened) ? focusObj.happened.slice(0, 4).map(e => ({
+          title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
+        })) : [],
+        upcoming: Array.isArray(focusObj.upcoming) ? focusObj.upcoming.slice(0, 3).map(e => ({
+          title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
+        })) : [],
+      };
+    }
+
     // ── 第三批：新進榜「發生了什麼」（Gemini + Google搜尋查即時事件）──
     const newcomers = top50.filter(s => s.isNew);
     let newcomerCards = [];
@@ -989,9 +1025,9 @@ ${ncList}`;
       }));
     }
 
-    const analysis = { ok: true, date, updatedAt: Date.now(), themeCards, tags, newcomerCards };
+    const analysis = { ok: true, date, updatedAt: Date.now(), marketFocus, themeCards, tags, newcomerCards };
     await kvPut("us_analysis", analysis, 86400 * 3);
-    console.log(`美股AI分析：題材${themeCards.length}組、標籤${Object.keys(tags).length}檔、新進榜${newcomerCards.length}檔`);
+    console.log(`美股AI分析：焦點(已發生${marketFocus.happened.length}/即將${marketFocus.upcoming.length})、題材${themeCards.length}組、標籤${Object.keys(tags).length}檔、新進榜${newcomerCards.length}檔`);
   } catch (e) {
     console.error("buildUsAnalysis error:", e.message);
   }
