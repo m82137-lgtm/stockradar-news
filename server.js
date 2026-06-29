@@ -717,9 +717,19 @@ const POLY_BASE   = "https://api.polygon.io";
 let _csCache = { date: "", set: null, names: null };
 const NON_STOCK_RE = /(Acquisition Corp|\bNotes\b|Preferred|Depositary|Warrant|\bUnits?\b|\bRight\b|Subordinated|Debenture)/i;
 
-function usPrevTradingDate(offsetDays = 1) {
+// 推算「最近一個已收盤的美股交易日」(回傳 YYYY-MM-DD)
+// 關鍵：美股收盤=美東16:00=UTC約20:00-21:00(夏令)/21:00-22:00(冬令)
+// 所以要先判斷「UTC 現在這天的美股盤收了沒」：
+//   - UTC 已過 22:00 → 今天的盤已收，最近交易日 = 今天(offsetBase=0)
+//   - UTC 還沒到 22:00 → 今天盤還沒收(或還沒開)，最近交易日 = 昨天(offsetBase=1)
+// 再往前跳過週末。offsetDays 額外再往前推幾天(抓前一日對照用)。
+function usPrevTradingDate(offsetDays = 0) {
+  const now = new Date();
+  // 美股收盤後才算「今天已收」，用 UTC 22:00 當保險分界(冬令美股也收完了)
+  const marketClosedToday = now.getUTCHours() >= 22;
+  const offsetBase = marketClosedToday ? 0 : 1;
   const d = new Date();
-  d.setUTCDate(d.getUTCDate() - offsetDays);
+  d.setUTCDate(d.getUTCDate() - offsetBase - offsetDays);
   while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
   return d.toISOString().slice(0, 10);
 }
@@ -757,19 +767,29 @@ async function fetchGroupedDaily(date) {
   return { ok: true, count: (j.results || []).length, map };
 }
 
+// 從某個 YYYY-MM-DD 往前推 N 個「交易日」(跳過週末)
+function prevTradingDayFrom(dateStr, n = 1) {
+  const d = new Date(dateStr + "T12:00:00Z");
+  for (let k = 0; k < n; k++) {
+    d.setUTCDate(d.getUTCDate() - 1);
+    while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
 async function buildUsTop50() {
   if (!POLYGON_KEY) return { ok: false, error: "POLYGON_KEY 未設定", data: [] };
   try {
     const wl = await fetchUsStockWhitelist();
-    let date = usPrevTradingDate(1), grouped = null;
+    let date = usPrevTradingDate(0), grouped = null;   // 0 = 最近一個已收盤交易日
     for (let i = 0; i < 4; i++) {
       grouped = await fetchGroupedDaily(date);
       if (grouped.ok && grouped.count > 100) break;
-      date = usPrevTradingDate(i + 2);
+      date = usPrevTradingDate(i + 1);                  // 抓不到就再往前一天
     }
     if (!grouped || !grouped.ok || grouped.count <= 100) return { ok: false, error: "Polygon grouped 無資料", data: [] };
 
-    const prevDateGuess = usPrevTradingDate(2);
+    const prevDateGuess = prevTradingDayFrom(date, 1);  // 從主抓日往前一個交易日(週一也不會重疊)
     const prev = await fetchGroupedDaily(prevDateGuess);
 
     const rows = [];
@@ -987,8 +1007,9 @@ app.get("/api/us-analysis", async (req, res) => {
   }
 });
 
-// cron：每天台北13:30(UTC5:30)抓美股
-cron.schedule("30 5 * * *", async () => {
+// cron：每天台北06:00(UTC前一天22:00)抓美股
+// 美股收盤台灣凌晨4點(夏令)~5點(冬令)，6點跑兩季都穩，讓使用者早上8點看到當天最新
+cron.schedule("0 22 * * *", async () => {
   const r = await buildUsTop50();
   if (r && r.ok && r.data && r.data.length) await buildUsAnalysis(r.data, r.date);
 });
