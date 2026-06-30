@@ -880,6 +880,27 @@ ${ncList}`;
     const analysis = { ok: true, date, updatedAt: Date.now(), marketFocus: finalMarketFocus, themeCards: finalThemeCards, tags: finalTags, newcomerCards: finalNewcomerCards };
     await kvPut("tw_analysis", analysis, 86400 * 3);
     console.log(`台股AI分析：焦點(已發生${finalMarketFocus.happened.length}/即將${finalMarketFocus.upcoming.length})、題材${finalThemeCards.length}組、標籤${Object.keys(finalTags).length}檔、新進榜${finalNewcomerCards.length}檔`);
+
+    // ── 第五批：存當天完整快照（top50 + analysis 合一）+ 維護日期清單 ──
+    try {
+      const top50full = await kvGet("tw_top50");
+      const snapshot = {
+        ok: true, date,
+        data: (top50full && top50full.data) ? top50full.data : top50,
+        updatedAt: top50full ? top50full.updatedAt : Date.now(),
+        marketFocus: finalMarketFocus, themeCards: finalThemeCards, tags: finalTags, newcomerCards: finalNewcomerCards,
+      };
+      await kvPut(`tw_snapshot_${date}`, snapshot, 86400 * 60);   // 快照保留60天
+      let dates = (await kvGet("tw_snapshot_dates")) || [];
+      if (!Array.isArray(dates)) dates = [];
+      if (!dates.includes(date)) dates.unshift(date);
+      dates.sort((a, b) => b.localeCompare(a));
+      dates = dates.slice(0, 60);
+      await kvPut("tw_snapshot_dates", dates, 86400 * 60);
+      console.log(`台股快照已存：tw_snapshot_${date}，目前共${dates.length}天歷史`);
+    } catch (e) {
+      console.error("存台股快照失敗:", e.message);
+    }
   } catch (e) {
     console.error("buildTwAnalysis error:", e.message);
   }
@@ -892,6 +913,34 @@ app.get("/api/tw-analysis", async (req, res) => {
     res.json({ ok: false, themeCards: [], tags: {} });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message, themeCards: [], tags: {} });
+  }
+});
+
+// 第五批：台股可選歷史日期清單
+app.get("/api/tw-dates", async (req, res) => {
+  try {
+    let dates = (await kvGet("tw_snapshot_dates")) || [];
+    if (!Array.isArray(dates)) dates = [];
+    if (!dates.length) {
+      const cur = await kvGet("tw_top50");
+      if (cur && cur.date) dates = [cur.date];
+    }
+    res.json({ ok: true, dates });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, dates: [] });
+  }
+});
+
+// 第五批：讀台股某一天的完整快照
+app.get("/api/tw-snapshot", async (req, res) => {
+  try {
+    const date = (req.query.date || "").slice(0, 10);
+    if (!date) return res.status(400).json({ ok: false, error: "缺少 date 參數" });
+    const snap = await kvGet(`tw_snapshot_${date}`);
+    if (snap && snap.ok) return res.json(snap);
+    res.status(404).json({ ok: false, error: `查無 ${date} 的快照` });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
