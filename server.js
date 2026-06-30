@@ -784,6 +784,7 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     const themeRaw = await callGemini(themePrompt);
     await new Promise(res => setTimeout(res, 4000));
     const tagRaw = await callGemini(tagPrompt);
+    await new Promise(res => setTimeout(res, 4000));
 
     // 解析題材卡片 + 算族群漲跌幅
     let themeCards = [];
@@ -798,14 +799,87 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     }
     const tags = parseGeminiJson(tagRaw) || {};
 
+    // ── 第四批：市場焦點雙欄（Gemini + Google 搜尋查台股當天大盤大事 + 即將到來）──
+    let marketFocus = { summary: '', happened: [], upcoming: [] };
+    const top10txt = top50.slice(0, 10).map(s => `${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n');
+    const focusPrompt = `你是專業台股財經記者，用繁體中文、台灣投資人口吻。請用 Google 搜尋查「台股最近一個交易日(${date})的大盤盤勢與重大事件」，以及「接下來幾天即將發生的重要事件」。參考當天成交值前10名：
+${top10txt}
+
+請輸出一個 JSON 物件，格式如下：
+{
+  "summary": "一段話總結今天台股大盤盤勢(70字內，提到加權指數漲跌、資金流向、領漲領跌族群、外資動向)",
+  "happened": [
+    {"title": "已發生事件標題(20字內，點出主角公司或族群)", "desc": "事件說明(50字內)", "date": "事件日期如6/28或今天"}
+  ],
+  "upcoming": [
+    {"title": "即將到來事件標題(20字內)", "desc": "事件說明(50字內)", "date": "預計日期如7/1或本週四"}
+  ]
+}
+寫作要求（很重要）：
+1. happened 列 4-5 則「最近已經發生」的台股重大事件，必須用 Google 搜尋查到真實近期新聞。每則要「具體」：點名是哪家公司或族群、發生什麼（財報數字、法說會、外資買賣超、漲價、訂單、分析師調目標價、MSCI調整、政策等），並簡述為何影響股價。例如「台積電法說會上調全年營收展望，帶動權值股走強」這種具體寫法，不要寫「電子股上漲」這種空泛句。
+2. upcoming 列 2-3 則「接下來幾天即將發生」的具體事件（即將召開的法說會、即將公布的月營收、即將出爐的經濟數據、除權息等）。
+3. 優先寫有明確主角、能解釋漲跌的事件。查不到的不要硬湊。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
+
+    const focusRaw = await callGemini(focusPrompt, true);   // true = 開 Google 搜尋
+    const focusObj = parseGeminiJson(focusRaw);
+    if (focusObj && typeof focusObj === 'object') {
+      marketFocus = {
+        summary: typeof focusObj.summary === 'string' ? focusObj.summary : '',
+        happened: Array.isArray(focusObj.happened) ? focusObj.happened.slice(0, 4).map(e => ({
+          title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
+        })) : [],
+        upcoming: Array.isArray(focusObj.upcoming) ? focusObj.upcoming.slice(0, 3).map(e => ({
+          title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
+        })) : [],
+      };
+    }
+    await new Promise(res => setTimeout(res, 4000));
+
+    // ── 第三批：新進榜「發生了什麼」（Gemini + Google 搜尋查台股個股即時事件）──
+    const newcomers = top50.filter(s => s.isNew);
+    let newcomerCards = [];
+    if (newcomers.length) {
+      const ncList = newcomers.map(s => `${s.code}(${s.name}) 漲跌${s.chg>0?'+':''}${s.chg}%`).join('\n');
+      const ncPrompt = `你是專業台股財經記者，用繁體中文、台灣投資人口吻。以下台股個股今天首次衝進成交值前50名、爆出大量。請用 Google 搜尋查出每一檔「最近這幾天股價為什麼大漲或大跌、為什麼爆量」的具體新聞原因。
+要查的方向：法說會、月營收數字、外資投信買賣超、漲價題材、大客戶訂單、分析師調目標價、產業利多利空、政策、得標等「近期具體事件」。不要查除權息或股利這種例行資料。
+每檔寫一句話，要「具體」：點出是什麼事件、有數字或對象就寫出來（例如「打入某大廠AI伺服器供應鏈、訂單能見度到明年」「外資連三買、調升目標價」），40字內，繁體中文。
+若真的查不到近期具體新聞，才寫「近期無明確個股消息，可能受族群輪動帶動」。
+輸出格式：只輸出一個 JSON 陣列，每個元素是 {"code":"代碼","event":"一句話原因字串"}。event 必須是純文字字串、不可以是物件或陣列。不要輸出 JSON 以外的任何文字。
+個股清單：
+${ncList}`;
+      const ncRaw = await callGemini(ncPrompt, true);   // true = 開 Google 搜尋
+      const ncArr = parseGeminiJson(ncRaw);
+      const eventMap = {};
+      if (Array.isArray(ncArr)) ncArr.forEach(x => {
+        if (x.code) {
+          let ev = x.event;
+          if (typeof ev !== 'string') ev = '';
+          eventMap[x.code] = ev;
+        }
+      });
+      newcomerCards = newcomers.map(s => ({
+        code: s.code, name: s.name, chg: s.chg,
+        tag: tags[s.code] || '',
+        event: eventMap[s.code] || '近期無明確個股消息，可能受族群輪動帶動。',
+      }));
+    }
+
     // 429 保護：生成失敗（空）時保留舊資料
     const prevAnalysis = (await kvGet("tw_analysis")) || {};
+    const focusOk = marketFocus.summary || marketFocus.happened.length || marketFocus.upcoming.length;
+    const finalMarketFocus = focusOk ? marketFocus : (prevAnalysis.marketFocus || marketFocus);
     const finalThemeCards = themeCards.length ? themeCards : (prevAnalysis.themeCards || []);
     const finalTags = Object.keys(tags).length ? tags : (prevAnalysis.tags || {});
+    const ncHasRealEvent = newcomerCards.some(c => c.event && !c.event.includes('無明確個股消息'));
+    const prevNc = prevAnalysis.newcomerCards || [];
+    const prevNcHasReal = prevNc.some(c => c.event && !c.event.includes('無明確個股消息'));
+    const sameNcCodes = newcomerCards.length === prevNc.length &&
+      newcomerCards.every(c => prevNc.find(p => p.code === c.code));
+    const finalNewcomerCards = (!ncHasRealEvent && prevNcHasReal && sameNcCodes) ? prevNc : newcomerCards;
 
-    const analysis = { ok: true, date, updatedAt: Date.now(), themeCards: finalThemeCards, tags: finalTags };
+    const analysis = { ok: true, date, updatedAt: Date.now(), marketFocus: finalMarketFocus, themeCards: finalThemeCards, tags: finalTags, newcomerCards: finalNewcomerCards };
     await kvPut("tw_analysis", analysis, 86400 * 3);
-    console.log(`台股AI分析：題材${finalThemeCards.length}組、標籤${Object.keys(finalTags).length}檔`);
+    console.log(`台股AI分析：焦點(已發生${finalMarketFocus.happened.length}/即將${finalMarketFocus.upcoming.length})、題材${finalThemeCards.length}組、標籤${Object.keys(finalTags).length}檔、新進榜${finalNewcomerCards.length}檔`);
   } catch (e) {
     console.error("buildTwAnalysis error:", e.message);
   }
