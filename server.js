@@ -752,9 +752,72 @@ app.get("/api/tw-top50", async (req, res) => {
 app.get("/api/tw-rebuild", async (req, res) => {
   try {
     const r = await buildTwTop50();
-    res.json({ ok: r.ok, date: r.date, count: r.count, note: r.ok ? "台股Top50已更新" : r.error });
+    if (r && r.ok && r.data && r.data.length) {
+      buildTwAnalysis(r.data, r.date).catch(e => console.error("tw analysis bg:", e.message));
+    }
+    res.json({ ok: r.ok, date: r.date, count: r.count, note: r.ok ? "台股Top50已更新，AI題材分析背景生成中" : r.error });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── 台股題材分析（第二批：發動題材卡片 + 每檔題材標籤；Gemini）──
+async function buildTwAnalysis(top50, date) {
+  if (!GEMINI_API_KEY) { console.log("台股AI：GEMINI_API_KEY 未設定，跳過"); return; }
+  try {
+    // 發動題材卡片
+    const themePrompt = `你是專業台股財經記者，用繁體中文、台灣投資人口吻。根據以下台股${date}成交值前20名，歸納成「今日發動題材／族群」，依資金熱度排序。
+重要規則：
+1. 必須列出 4-6 組題材（不要只列1-2組），把前20名的個股盡量都歸類進去，不管漲跌都要分類（成交值大代表資金關注）。
+2. 用台股熟悉的族群名，如：晶圓代工、IC設計、記憶體、PCB載板、CCL銅箔基板、被動元件、面板、封測、散熱、矽智財、AI伺服器、金融、光學、網通、ABF載板、CoWoS先進封裝等。
+3. desc 要「具體」：點出該族群今天為什麼動（AI需求、漲價、訂單、財報、題材輪動等），不要只寫「表現強勁」。例如「AI伺服器需求帶動PCB載板與CCL漲價，營收動能延續」。
+只輸出 JSON 陣列：[{"name":"題材名","codes":["代碼1","代碼2"],"desc":"一句話說明今日該族群表現與具體催化因素(35字內)"}]
+不要其他文字、不要markdown框。codes只放下方有的代碼，每組至少1檔。
+成交值前20：
+${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n')}`;
+
+    // 每檔題材標籤
+    const tagPrompt = `為以下台股個股各標一個「最貼切的中文題材標籤」(3-6字，如：晶圓代工、IC設計、記憶體、PCB載板、銅箔基板、被動元件、面板、封測、散熱、矽智財、AI伺服器、金控、光學鏡頭、網通、軍工、生技、ETF 等)。
+只輸出JSON物件 {"代碼":"標籤",...}，不要其他文字、不要markdown框。
+個股：${top50.map(s=>`${s.code}(${s.name})`).join('、')}`;
+
+    const themeRaw = await callGemini(themePrompt);
+    await new Promise(res => setTimeout(res, 4000));
+    const tagRaw = await callGemini(tagPrompt);
+
+    // 解析題材卡片 + 算族群漲跌幅
+    let themeCards = [];
+    const arr = parseGeminiJson(themeRaw);
+    if (Array.isArray(arr)) {
+      const chgMap = {}; top50.forEach(s => { chgMap[s.code] = s.chg; });
+      themeCards = arr.map(t => {
+        const codes = (t.codes || []).filter(c => chgMap[c] !== undefined);
+        const avgChg = codes.length ? codes.reduce((sum, c) => sum + (chgMap[c] || 0), 0) / codes.length : 0;
+        return { name: t.name || '', codes, desc: t.desc || '', chg: Math.round(avgChg * 100) / 100 };
+      }).filter(t => t.name && t.codes.length);
+    }
+    const tags = parseGeminiJson(tagRaw) || {};
+
+    // 429 保護：生成失敗（空）時保留舊資料
+    const prevAnalysis = (await kvGet("tw_analysis")) || {};
+    const finalThemeCards = themeCards.length ? themeCards : (prevAnalysis.themeCards || []);
+    const finalTags = Object.keys(tags).length ? tags : (prevAnalysis.tags || {});
+
+    const analysis = { ok: true, date, updatedAt: Date.now(), themeCards: finalThemeCards, tags: finalTags };
+    await kvPut("tw_analysis", analysis, 86400 * 3);
+    console.log(`台股AI分析：題材${finalThemeCards.length}組、標籤${Object.keys(finalTags).length}檔`);
+  } catch (e) {
+    console.error("buildTwAnalysis error:", e.message);
+  }
+}
+
+app.get("/api/tw-analysis", async (req, res) => {
+  try {
+    const cached = await kvGet("tw_analysis");
+    if (cached && cached.ok) return res.json(cached);
+    res.json({ ok: false, themeCards: [], tags: {} });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, themeCards: [], tags: {} });
   }
 });
 
@@ -766,12 +829,18 @@ cron.schedule("*/5 * * * *", async () => {
 
 // 台股 Top50 cron：台股下午1:30收盤，2:30+3:30各跑一次（資料 ready 後抓當天）
 cron.schedule("30 6 * * *", async () => {   // 台北 14:30 (UTC 06:30)
-  try { const r = await buildTwTop50(); console.log(`台股 cron(14:30) date=${r && r.date}`); }
-  catch (e) { console.error("台股 cron(14:30) error:", e.message); }
+  try {
+    const r = await buildTwTop50();
+    if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
+    console.log(`台股 cron(14:30) date=${r && r.date}`);
+  } catch (e) { console.error("台股 cron(14:30) error:", e.message); }
 });
 cron.schedule("30 7 * * *", async () => {   // 台北 15:30 補跑
-  try { const r = await buildTwTop50(); console.log(`台股 cron(15:30補) date=${r && r.date}`); }
-  catch (e) { console.error("台股 cron(15:30補) error:", e.message); }
+  try {
+    const r = await buildTwTop50();
+    if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
+    console.log(`台股 cron(15:30補) date=${r && r.date}`);
+  } catch (e) { console.error("台股 cron(15:30補) error:", e.message); }
 });
 
 // 健康檢查（UptimeRobot ping 用）
