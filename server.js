@@ -698,8 +698,9 @@ async function buildTwTop50() {
     if (mRoc) date = `${+mRoc[1] + 1911}-${mRoc[2]}-${mRoc[3]}`;
     else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) date = rawDate.slice(0, 10);
 
-    // ── 合併、依成交值排序、取前50 ──
-    const all = [...tseData, ...otcData].filter(s => s.tradeValue > 0 && s.close > 0);
+    // ── 合併、排除 ETF（代碼開頭 00，如 0050/0056/00878）、依成交值排序、取前50 ──
+    const isTwEtf = (code) => /^00/.test(String(code));   // 台股 ETF 代碼開頭 00
+    const all = [...tseData, ...otcData].filter(s => s.tradeValue > 0 && s.close > 0 && !isTwEtf(s.code));
     all.sort((a, b) => b.tradeValue - a.tradeValue);
     let top50 = all.slice(0, 50).map((s, i) => ({
       rank: i + 1,
