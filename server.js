@@ -950,20 +950,21 @@ cron.schedule("*/5 * * * *", async () => {
   await updateTwNews();   // 台股新聞（鉅亨）：搬自 Worker，每5分鐘抓→有新才寫 KV
 });
 
-// 台股 Top50 cron：台股下午1:30收盤，2:30+3:30各跑一次（資料 ready 後抓當天）
-cron.schedule("30 6 * * *", async () => {   // 台北 14:30 (UTC 06:30)
+// 台股 Top50 cron：台股下午1:30收盤，但 STOCK_DAY_ALL 全市場彙總約下午5點才更新完整
+// 17:00(UTC 09:00)抓當天完整收盤 + 18:00(UTC 10:00)補跑一次（雙保險）
+cron.schedule("0 9 * * *", async () => {   // 台北 17:00 (UTC 09:00)
   try {
     const r = await buildTwTop50();
     if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
-    console.log(`台股 cron(14:30) date=${r && r.date}`);
-  } catch (e) { console.error("台股 cron(14:30) error:", e.message); }
+    console.log(`台股 cron(17:00) date=${r && r.date}`);
+  } catch (e) { console.error("台股 cron(17:00) error:", e.message); }
 });
-cron.schedule("30 7 * * *", async () => {   // 台北 15:30 補跑
+cron.schedule("0 10 * * *", async () => {   // 台北 18:00 補跑
   try {
     const r = await buildTwTop50();
     if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
-    console.log(`台股 cron(15:30補) date=${r && r.date}`);
-  } catch (e) { console.error("台股 cron(15:30補) error:", e.message); }
+    console.log(`台股 cron(18:00補) date=${r && r.date}`);
+  } catch (e) { console.error("台股 cron(18:00補) error:", e.message); }
 });
 
 // 健康檢查（UptimeRobot ping 用）
