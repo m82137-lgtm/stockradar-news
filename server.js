@@ -1058,6 +1058,36 @@ const POLY_BASE   = "https://api.polygon.io";
 let _csCache = { date: "", set: null, names: null };
 const NON_STOCK_RE = /(Acquisition Corp|\bNotes\b|Preferred|Depositary|Warrant|\bUnits?\b|\bRight\b|Subordinated|Debenture)/i;
 
+// ── 美股 ETF 名單過濾（保險層）──
+// 白名單已用 type=CS（普通股）抓，理論上 ETF(type=ETF)進不來；
+// 但 Polygon 偶有把 ETF 誤標成 CS 的情況，故再用「高成交值熱門 ETF 名單」擋一層。
+// 涵蓋大盤/產業/債券/商品/槓桿反向/ARK/配息/加密貨幣等成交值排得進前50的 ETF。
+const US_ETF_SET = new Set([
+  // 大盤/綜合
+  "SPY","QQQ","QQQM","VOO","IVV","VTI","VT","ITOT","SPLG","RSP","VTV","VUG","IWF","IWD","SCHG","SCHV","MGK","SCHB","SCHX",
+  // 小/中型
+  "IWM","IWN","IWO","IJR","IJH","MDY","VB","VO","VBR",
+  // 國際/區域
+  "VEA","VWO","EEM","IEFA","IEMG","EFA","VXUS","ACWI","EWJ","EWZ","FXI","MCHI","KWEB","INDA","EWT","EWY","ASHR","EWG","EWU",
+  // 產業 SPDR / 其他產業
+  "XLF","XLK","XLE","XLV","XLI","XLU","XLP","XLY","XLB","XLRE","XLC","SMH","SOXX","XBI","IBB","KRE","XOP","XME","GDX","GDXJ","ITB","XRT","XHB","JETS","TAN","ICLN","HACK","ARKK","ARKW","ARKG","ARKF","ARKQ","ARKX",
+  // 債券
+  "TLT","IEF","SHY","AGG","BND","HYG","LQD","JNK","TIP","BIL","SHV","MBB","VCIT","VCSH","EMB","BKLN","SGOV","TLH","GOVT",
+  // 商品/貴金屬
+  "GLD","IAU","GLDM","SLV","USO","UNG","DBC","PDBC","SLX","CPER","BOIL","KOLD","UGA",
+  // 槓桿/反向（成交值常很高）
+  "SQQQ","TQQQ","SOXL","SOXS","SPXL","SPXS","SPXU","UPRO","SDOW","UDOW","TNA","TZA","LABU","LABD","FAS","FAZ","TMF","TMV","NUGT","DUST","YINN","YANG","NVDL","NVDU","TSLL","TSLQ","TSLS","MSTU","MSTX","MSTZ","CONL","FNGU","FNGD","BITX","ETHU","WEBL","DRV","DPST","ERX","ERY","GUSH","DRIP","JNUG","JDST",
+  // 波動率
+  "UVXY","SVXY","VXX","UVIX","SVIX","VIXY",
+  // 配息/品質/動能
+  "SCHD","VIG","VYM","DVY","JEPI","JEPQ","DGRO","NOBL","HDV","SDIV","QUAL","USMV","MTUM","VLUE","SPLV","SPHD","DGRW","SPYD",
+  // 加密貨幣（現貨/期貨 ETF，現在成交值極高）
+  "IBIT","FBTC","GBTC","ETHE","BITO","ARKB","BITB","HODL","EZBC","BTCO","ETHA","BRRR","EZET","FETH","ETHV","ETHW","BTCW","DEFI",
+  // Vanguard 產業
+  "VGT","VHT","VFH","VDE","VNQ","VPU","VAW","VIS","VCR","VDC","VOX","VYMI","VEU",
+]);
+const isUsEtf = (code) => US_ETF_SET.has(String(code).toUpperCase());
+
 // 推算「最近一個已收盤的美股交易日」(回傳 YYYY-MM-DD)
 // 關鍵：美股收盤=美東16:00=UTC約20:00-21:00(夏令)/21:00-22:00(冬令)
 // 所以要先判斷「UTC 現在這天的美股盤收了沒」：
@@ -1136,6 +1166,7 @@ async function buildUsTop50() {
     const rows = [];
     for (const [ticker, d] of grouped.map) {
       if (!wl.set.has(ticker)) continue;
+      if (isUsEtf(ticker)) continue;            // 排除 ETF（保險層，擋 Polygon 誤標成 CS 的 ETF）
       const close = d.c || 0, vol = d.v || 0, vwap = d.vw || close;
       if (close <= 0 || vol <= 0) continue;
       let chgPct = 0;
