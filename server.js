@@ -929,11 +929,12 @@ async function buildUsAnalysis(top50, date) {
   if (!GEMINI_API_KEY) { console.log("美股AI：GEMINI_API_KEY 未設定，跳過"); return; }
   try {
     // 發動題材卡片（JSON：題材名+成員代碼+說明）
-    const themePrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。根據以下美股${date}成交值前20名，歸納成「今日發動題材／族群」，依資金熱度排序。
+    const themePrompt = `你是專業美股財經記者，用繁體中文、台灣投資人口吻。根據以下美股${date}成交值前20名，歸納成「今日發動題材／族群」，依資金熱度排序。
 重要規則：
 1. 必須列出 4-6 組題材（不要只列1-2組），把前20名的個股盡量都歸類進去，不管當天漲或跌都要分類（成交值大本身就代表資金關注，跌的也是題材）。
 2. 常見題材如：AI半導體、記憶體、AI晶片、雲端服務、電動車、太空、金融、減肥藥GLP-1、半導體設備、串流媒體、社群媒體、電商等。
-只輸出 JSON 陣列：[{"name":"題材名","codes":["代碼1","代碼2"],"desc":"一句話說明今日該族群表現與催化因素(30字內)"}]
+3. desc 要「具體」：點出該族群今天為什麼動（催化因素：AI需求、財報、訂單、政策、資金輪動等），不要只寫「表現強勁」這種空泛句。例如「AI 伺服器需求帶動上游半導體設備訂單與營收預期」這種寫法。
+只輸出 JSON 陣列：[{"name":"題材名","codes":["代碼1","代碼2"],"desc":"一句話說明今日該族群表現與具體催化因素(35字內)"}]
 不要其他文字、不要markdown框。codes只放下方有的代碼，每組至少1檔。
 成交值前20：
 ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n')}`;
@@ -965,23 +966,23 @@ ${top50.slice(0,20).map(s=>`${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).jo
     await new Promise(res => setTimeout(res, 4000));
     let marketFocus = { summary: '', happened: [], upcoming: [] };
     const top10txt = top50.slice(0, 10).map(s => `${s.code}(${s.name}) ${s.chg>0?'+':''}${s.chg}%`).join('\n');
-    const focusPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。請用 Google 搜尋查「美股最近一個交易日(${date})的整體盤勢與重大事件」，以及「接下來幾天即將發生的重要事件」。參考當天成交值前10名：
+    const focusPrompt = `你是專業美股財經記者，用繁體中文、台灣投資人口吻。請用 Google 搜尋查「美股最近一個交易日(${date})的整體盤勢與重大事件」，以及「接下來幾天即將發生的重要事件」。參考當天成交值前10名：
 ${top10txt}
 
 請輸出一個 JSON 物件，格式如下：
 {
   "summary": "一段話總結今天美股整體盤勢(70字內，提到資金流向、領漲領跌族群、大盤氛圍)",
   "happened": [
-    {"title": "已發生事件標題(15字內)", "desc": "事件說明(40字內)", "date": "事件日期如6/25或今天"}
+    {"title": "已發生事件標題(20字內，要點出主角公司或主題)", "desc": "事件說明(50字內)", "date": "事件日期如6/25或今天"}
   ],
   "upcoming": [
-    {"title": "即將到來事件標題(15字內)", "desc": "事件說明(40字內)", "date": "預計日期如6/27或本週四"}
+    {"title": "即將到來事件標題(20字內)", "desc": "事件說明(50字內)", "date": "預計日期如6/27或本週四"}
   ]
 }
-規則：
-1. happened 列 3-4 則「最近已經發生」的美股重大事件(財報、Fed利率、經濟數據、產業大事、個股大新聞等)，用 Google 搜尋查真實的近期新聞。
-2. upcoming 列 2-3 則「接下來幾天即將發生」的事件(即將公布的財報、即將開的會議、即將出的數據等)。
-3. 全部用繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
+寫作要求（很重要，這決定內容品質）：
+1. happened 列 4-5 則「最近已經發生」的美股重大事件，必須用 Google 搜尋查到真實近期新聞。每則要「具體」：點名是哪家公司或哪個族群、發生什麼事（財報數字、併購對象、分析師調評幅度、納入/剔除指數、產品發表、政策、訂單金額等），並簡述「為什麼影響股價」。例如「Alphabet 正式納入道瓊工業指數、取代 Verizon，以藍籌身份重新評價」這種具體寫法，不要寫「科技股上漲」這種空泛句。
+2. upcoming 列 2-3 則「接下來幾天即將發生」的具體事件（即將公布的某公司財報、即將召開的會議名稱、即將出爐的經濟數據名稱與日期）。
+3. 優先寫「有明確主角、有具體內容、能解釋漲跌」的事件。查不到具體新聞的就不要硬湊空泛句。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
 
     const focusRaw = await callGemini(focusPrompt, true);   // true = 開 Google 搜尋
     const focusObj = parseGeminiJson(focusRaw);
@@ -1002,8 +1003,10 @@ ${top10txt}
     let newcomerCards = [];
     if (newcomers.length) {
       const ncList = newcomers.map(s => `${s.code}(${s.name}) 漲跌${s.chg>0?'+':''}${s.chg}%`).join('\n');
-      const ncPrompt = `你是美股分析師，用繁體中文、台灣投資人口吻。以下個股今天首次衝進美股成交值前50名、爆出大量。請用 Google 搜尋查出每一檔「最近這幾天股價為什麼大漲或大跌、為什麼爆量」的新聞原因（例如：財報、併購、分析師調評、產品發表、產業利多利空、政策、大客戶訂單等近期事件），不要查股票分割或股息這種無關的歷史資料。
-每檔寫一句話總結原因（35字內，繁體中文）。若真的查不到近期新聞，才寫「近期無明確個股消息，可能受族群輪動帶動」。
+      const ncPrompt = `你是專業美股財經記者，用繁體中文、台灣投資人口吻。以下個股今天首次衝進美股成交值前50名、爆出大量。請用 Google 搜尋查出每一檔「最近這幾天股價為什麼大漲或大跌、為什麼爆量」的具體新聞原因。
+要查的方向：財報數字、併購對象、分析師調評(誰調、調到多少)、產品或技術發表、大客戶訂單(金額)、產業利多利空、政策法規、指數調整、機構買賣等「近期具體事件」。不要查股票分割或股息這種無關的歷史資料。
+每檔寫一句話，要「具體」：點出是什麼事件、有數字或對象就寫出來（例如「宣布庫藏股回購並啟動比特幣變現計畫」「獲分析師重申買進、目標價上調」「擴大與某大廠 AI 合作」），40字內，繁體中文。
+若真的查不到近期具體新聞，才寫「近期無明確個股消息，可能受族群輪動帶動」。
 輸出格式：只輸出一個 JSON 陣列，每個元素是 {"code":"代碼","event":"一句話原因字串"}。event 必須是純文字字串、不可以是物件或陣列。不要輸出 JSON 以外的任何文字。
 個股清單：
 ${ncList}`;
@@ -1025,9 +1028,30 @@ ${ncList}`;
       }));
     }
 
-    const analysis = { ok: true, date, updatedAt: Date.now(), marketFocus, themeCards, tags, newcomerCards };
+    // ── 429 保護：若這次某部分生成失敗（空），保留上次的舊資料，不要用空的覆蓋 ──
+    const prevAnalysis = (await kvGet("us_analysis")) || {};
+    const focusOk = marketFocus.summary || marketFocus.happened.length || marketFocus.upcoming.length;
+    const finalMarketFocus = focusOk ? marketFocus : (prevAnalysis.marketFocus || marketFocus);
+    const finalThemeCards = themeCards.length ? themeCards : (prevAnalysis.themeCards || []);
+    const finalTags = Object.keys(tags).length ? tags : (prevAnalysis.tags || {});
+    // 新進榜：若這次 event 全是 fallback（Google搜尋失敗），且上次有真資料，保留上次的
+    const ncHasRealEvent = newcomerCards.some(c => c.event && !c.event.includes('無明確個股消息'));
+    const prevNc = prevAnalysis.newcomerCards || [];
+    const prevNcHasReal = prevNc.some(c => c.event && !c.event.includes('無明確個股消息'));
+    const sameNcCodes = newcomerCards.length === prevNc.length &&
+      newcomerCards.every(c => prevNc.find(p => p.code === c.code));
+    const finalNewcomerCards = (!ncHasRealEvent && prevNcHasReal && sameNcCodes) ? prevNc : newcomerCards;
+
+    const analysis = { ok: true, date, updatedAt: Date.now(), marketFocus: finalMarketFocus, themeCards: finalThemeCards, tags: finalTags, newcomerCards: finalNewcomerCards };
     await kvPut("us_analysis", analysis, 86400 * 3);
-    console.log(`美股AI分析：焦點(已發生${marketFocus.happened.length}/即將${marketFocus.upcoming.length})、題材${themeCards.length}組、標籤${Object.keys(tags).length}檔、新進榜${newcomerCards.length}檔`);
+    const keptParts = [];
+    if (!focusOk && finalMarketFocus !== marketFocus) keptParts.push('焦點');
+    if (!themeCards.length && finalThemeCards.length) keptParts.push('題材');
+    if (!Object.keys(tags).length && Object.keys(finalTags).length) keptParts.push('標籤');
+    console.log(`美股AI分析：焦點${finalMarketFocus.happened.length}/${finalMarketFocus.upcoming.length}、題材${finalThemeCards.length}組、標籤${Object.keys(finalTags).length}檔、新進榜${finalNewcomerCards.length}檔${keptParts.length?'（429保護:保留舊'+keptParts.join('/')+'）':''}`);
+
+    // 用 final 版本存快照
+    const themeCardsForSnap = finalThemeCards, tagsForSnap = finalTags, marketFocusForSnap = finalMarketFocus, newcomerCardsForSnap = finalNewcomerCards;
 
     // ── 第五批：存當天完整快照（top50 + analysis 合一）+ 維護日期清單 ──
     try {
@@ -1036,7 +1060,7 @@ ${ncList}`;
         ok: true, date,
         data: (top50full && top50full.data) ? top50full.data : top50,
         updatedAt: top50full ? top50full.updatedAt : Date.now(),
-        marketFocus, themeCards, tags, newcomerCards,
+        marketFocus: marketFocusForSnap, themeCards: themeCardsForSnap, tags: tagsForSnap, newcomerCards: newcomerCardsForSnap,
       };
       await kvPut(`us_snapshot_${date}`, snapshot, 86400 * 60);   // 快照保留60天
       // 更新日期清單（最新在前、去重、最多保留60筆）
@@ -1094,12 +1118,19 @@ app.get("/api/us-snapshot", async (req, res) => {
   }
 });
 
-// cron：每天台北06:00(UTC前一天22:00)抓美股
-// 美股收盤台灣凌晨4點(夏令)~5點(冬令)，6點跑兩季都穩，讓使用者早上8點看到當天最新
-cron.schedule("0 22 * * *", async () => {
-  const r = await buildUsTop50();
-  if (r && r.ok && r.data && r.data.length) await buildUsAnalysis(r.data, r.date);
-});
+// cron：每天台北13:00抓美股（UTC 05:00）。實測 Polygon 免費版當天資料約台北下午1點 ready
+// 1點半(UTC 05:30)再補跑一次：若1點時資料還沒完全好，補抓當天最新（雙保險）
+async function runUsCron(label) {
+  try {
+    const r = await buildUsTop50();
+    if (r && r.ok && r.data && r.data.length) await buildUsAnalysis(r.data, r.date);
+    console.log(`美股 cron(${label}) 完成：date=${r && r.date}`);
+  } catch (e) {
+    console.error(`美股 cron(${label}) error:`, e.message);
+  }
+}
+cron.schedule("0 5 * * *", () => runUsCron("13:00"));    // 台北下午1點
+cron.schedule("30 5 * * *", () => runUsCron("13:30補"));  // 台北下午1點半補跑
 
 app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
