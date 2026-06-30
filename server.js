@@ -614,6 +614,7 @@ async function fetchOtcDaily() {
     data.push({
       code,
       name: String(row.CompanyName || "").trim(),
+      market: "OTC",
       close,
       chgPct,
       vol: Math.round(volume / 1000),
