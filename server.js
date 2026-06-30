@@ -623,10 +623,155 @@ async function fetchOtcDaily() {
   return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
 }
 
+// ══════════════ 台股 Top50（比照美股，全程在 Render，資料源：TWSE上市 + 櫃買上櫃）══════════════
+// 上市每日收盤：TWSE STOCK_DAY_ALL（一次回全部上市股，含成交金額=成交值）
+async function fetchTseDaily() {
+  const URL = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL?response=json";
+  const r = await fetch(URL, {
+    headers: {
+      "User-Agent": BROWSER_UA,
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+      "Referer": "https://www.twse.com.tw/",
+    },
+  });
+  const status = r.status;
+  const text = await r.text();
+  // TWSE 此 API 為 CSV：每欄雙引號包住、欄序最前面多一欄「日期」。
+  // 砍掉日期欄後對齊：row[0]證券代號 row[1]名稱 row[2]成交股數 row[3]成交金額 row[7]收盤價 row[8]漲跌價差
+  const lines = text.trim().split("\n");
+  if (lines.length < 2) return { ok: false, status, head: text.slice(0, 200), data: [] };
+  const num = (s) => {
+    const n = parseFloat(String(s == null ? "" : s).replace(/,/g, "").replace(/\+/g, "").trim());
+    return isNaN(n) ? 0 : n;
+  };
+  const data = [];
+  let dateStr = null;
+  for (const line of lines) {
+    const cols = line.split(",").map(c => c.replace(/^"|"\r?$|"$/g, "").trim());
+    if (!dateStr && cols[0] && /^\d/.test(cols[0])) dateStr = cols[0];   // 第一欄是日期
+    const row = cols.slice(1);   // 砍掉日期欄
+    const code = String(row[0] || "").trim();
+    if (!/^\d{4}$/.test(code)) continue;
+    const price = num(row[7]);
+    const chgAmt = num(row[8]);
+    const volume = num(row[2]);
+    const tradeValue = num(row[3]);
+    if (price <= 0 || tradeValue <= 0) continue;
+    const prevClose = price - chgAmt;
+    const chgPct = prevClose > 0 ? +((chgAmt / prevClose) * 100).toFixed(2) : 0;
+    data.push({
+      code, name: String(row[1] || "").trim(), market: "TSE",
+      close: price, chgPct, vol: Math.round(volume / 1000), tradeValue,
+    });
+  }
+  return { ok: true, status, date: dateStr, count: data.length, data };
+}
+
+// 台股最近一個交易日（YYYY-MM-DD）：台股下午1:30收盤，資料約下午2-3點 ready
+// 簡化：用台灣當天日期；若當天非交易日（週末）往前推到週五
+function twTradingDate(offsetDays = 0) {
+  const now = new Date();
+  const tw = new Date(now.getTime() + 8 * 3600 * 1000);   // UTC→台灣
+  tw.setUTCDate(tw.getUTCDate() - offsetDays);
+  while (tw.getUTCDay() === 0 || tw.getUTCDay() === 6) tw.setUTCDate(tw.getUTCDate() - 1);
+  return tw.toISOString().slice(0, 10);
+}
+
+async function buildTwTop50() {
+  try {
+    // ── 抓上市 + 上櫃（都在 Render）──
+    const [tse, otc] = await Promise.all([
+      fetchTseDaily().catch(e => { console.error("fetchTseDaily error:", e.message); return { ok: false, data: [] }; }),
+      fetchOtcDaily().catch(e => { console.error("fetchOtcDaily error:", e.message); return { ok: false, data: [] }; }),
+    ]);
+    const tseData = (tse.ok && Array.isArray(tse.data)) ? tse.data : [];
+    const otcData = (otc.ok && Array.isArray(otc.data)) ? otc.data : [];
+    if (!tseData.length && !otcData.length) return { ok: false, error: "台股上市櫃皆無資料", data: [] };
+
+    // 日期：以上市資料的日期為準（民國年轉西元），抓不到就用台灣當天
+    let date = twTradingDate(0);
+    const rawDate = tse.date || otc.date || "";
+    // TWSE 日期格式可能是「115/06/30」(民國) 或 ISO，櫃買是 ISO。統一轉 YYYY-MM-DD
+    const mRoc = rawDate.match(/^(\d{3})\/(\d{2})\/(\d{2})$/);
+    if (mRoc) date = `${+mRoc[1] + 1911}-${mRoc[2]}-${mRoc[3]}`;
+    else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) date = rawDate.slice(0, 10);
+
+    // ── 合併、依成交值排序、取前50 ──
+    const all = [...tseData, ...otcData].filter(s => s.tradeValue > 0 && s.close > 0);
+    all.sort((a, b) => b.tradeValue - a.tradeValue);
+    let top50 = all.slice(0, 50).map((s, i) => ({
+      rank: i + 1,
+      code: s.code, name: s.name, market: s.market,
+      price: s.close,
+      chg: s.chgPct,
+      tradeValue: s.tradeValue,
+      vol: s.vol,
+    }));
+
+    // ── 在榜天數 + 排名變化 + NEW（比照美股）──
+    const snap = (await kvGet("tw_prev_top50")) || { date: "", codes: [] };
+    const prevCodes = new Set(snap.codes || []);
+    const isFirstRun = !snap.date;
+    const hist = (await kvGet("tw_history")) || {};
+    const newHist = {};
+    top50 = top50.map(s => {
+      const h = hist[s.code];
+      const isNew = !isFirstRun && !prevCodes.has(s.code);
+      const days = h ? (h.days || 1) + 1 : 1;
+      const rankChange = h && h.lastRank ? (h.lastRank - s.rank) : 0;
+      newHist[s.code] = { days, lastRank: s.rank, firstDate: h?.firstDate || date };
+      return { ...s, days, isNew, rankChange };
+    });
+    await kvPut("tw_history", newHist, 86400 * 30);
+    if (snap.date !== date) {
+      await kvPut("tw_prev_top50", { date, codes: top50.map(s => s.code) }, 86400 * 7);
+    }
+
+    const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
+    await kvPut("tw_top50", result, 86400 * 3);
+    console.log(`台股Top50：date=${date} 共${top50.length}檔（TSE ${tseData.length}+OTC ${otcData.length}），新進榜${top50.filter(s => s.isNew).length}檔`);
+    return result;
+  } catch (e) {
+    console.error("buildTwTop50 error:", e.message);
+    return { ok: false, error: e.message, data: [] };
+  }
+}
+
+app.get("/api/tw-top50", async (req, res) => {
+  try {
+    const cached = await kvGet("tw_top50");
+    if (cached && cached.ok) return res.json(cached);
+    const fresh = await buildTwTop50();
+    res.json(fresh);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message, data: [] });
+  }
+});
+
+app.get("/api/tw-rebuild", async (req, res) => {
+  try {
+    const r = await buildTwTop50();
+    res.json({ ok: r.ok, date: r.date, count: r.count, note: r.ok ? "台股Top50已更新" : r.error });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // 全天每 5 分鐘更新熱門族群新聞（含盤中盤後；有新聞才寫 KV）
 cron.schedule("*/5 * * * *", async () => {
   await updateSectorNews();
   await updateTwNews();   // 台股新聞（鉅亨）：搬自 Worker，每5分鐘抓→有新才寫 KV
+});
+
+// 台股 Top50 cron：台股下午1:30收盤，2:30+3:30各跑一次（資料 ready 後抓當天）
+cron.schedule("30 6 * * *", async () => {   // 台北 14:30 (UTC 06:30)
+  try { const r = await buildTwTop50(); console.log(`台股 cron(14:30) date=${r && r.date}`); }
+  catch (e) { console.error("台股 cron(14:30) error:", e.message); }
+});
+cron.schedule("30 7 * * *", async () => {   // 台北 15:30 補跑
+  try { const r = await buildTwTop50(); console.log(`台股 cron(15:30補) date=${r && r.date}`); }
+  catch (e) { console.error("台股 cron(15:30補) error:", e.message); }
 });
 
 // 健康檢查（UptimeRobot ping 用）
