@@ -807,28 +807,29 @@ ${top10txt}
 
 請輸出一個 JSON 物件，格式如下：
 {
-  "summary": "一段話總結今天台股大盤盤勢(70字內，提到加權指數漲跌、資金流向、領漲領跌族群、外資動向)",
+  "summary": "一段完整的盤勢總結(120-160字，像財經晨報的開場：先講加權指數漲跌點數與收盤點位、成交量，再講今天資金主軸與領漲領跌族群，最後點出外資/投信動向與市場故事線。要寫成通順的一整段，不是條列)",
   "happened": [
-    {"title": "已發生事件標題(20字內，點出主角公司或族群)", "desc": "事件說明(50字內)", "date": "事件日期如6/28或今天"}
+    {"title": "已發生事件標題(20字內，點出主角公司或族群)", "desc": "事件說明(60-80字，要有來龍去脈、數字、為何影響股價)", "date": "事件日期如6/28或今天"}
   ],
   "upcoming": [
-    {"title": "即將到來事件標題(20字內)", "desc": "事件說明(50字內)", "date": "預計日期如7/1或本週四"}
+    {"title": "即將到來事件標題(20字內)", "desc": "事件說明(60-80字，具體說明是什麼事、預期影響哪些族群)", "date": "預計日期如7/1或本週四"}
   ]
 }
-寫作要求（很重要）：
-1. happened 列 4-5 則「最近已經發生」的台股重大事件，必須用 Google 搜尋查到真實近期新聞。每則要「具體」：點名是哪家公司或族群、發生什麼（財報數字、法說會、外資買賣超、漲價、訂單、分析師調目標價、MSCI調整、政策等），並簡述為何影響股價。例如「台積電法說會上調全年營收展望，帶動權值股走強」這種具體寫法，不要寫「電子股上漲」這種空泛句。
-2. upcoming 列 2-3 則「接下來幾天即將發生」的具體事件（即將召開的法說會、即將公布的月營收、即將出爐的經濟數據、除權息等）。
-3. 優先寫有明確主角、能解釋漲跌的事件。查不到的不要硬湊。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
+寫作要求（很重要，這決定內容品質）：
+1. summary 要寫得完整詳盡（120-160字），像專業財經媒體的盤後總評，把今天台股的故事說清楚（指數點數、成交量、資金流向、領漲領跌族群、外資投信動向、市場主軸題材）。
+2. happened 列「5 則」最近已經發生的台股重大事件，必須用 Google 搜尋查到真實近期新聞。每則 desc 要寫 60-80 字、有來龍去脈：點名哪家公司或族群、發生什麼（財報數字、法說會結論、外資買賣超金額、漲價幅度、訂單金額、分析師調目標價到多少、MSCI調整、政策等），並說明為何影響股價。例如「台積電法說會上調全年營收展望至中段30%成長，並宣布擴大資本支出，帶動上游設備與CoWoS供應鏈走強」這種具體寫法，不要寫「電子股上漲」這種空泛句。
+3. upcoming 列「5 則」接下來幾天即將發生的具體事件（即將召開的法說會、即將公布的月營收、即將出爐的經濟數據、除權息、產業會議、政策議程等），每則 desc 也寫 60-80 字、說明預期影響。
+4. 優先寫有明確主角、能解釋漲跌的事件。查不到的不要硬湊空泛句，但盡量湊滿5則。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
 
     const focusRaw = await callGemini(focusPrompt, true);   // true = 開 Google 搜尋
     const focusObj = parseGeminiJson(focusRaw);
     if (focusObj && typeof focusObj === 'object') {
       marketFocus = {
         summary: typeof focusObj.summary === 'string' ? focusObj.summary : '',
-        happened: Array.isArray(focusObj.happened) ? focusObj.happened.slice(0, 4).map(e => ({
+        happened: Array.isArray(focusObj.happened) ? focusObj.happened.slice(0, 5).map(e => ({
           title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
         })) : [],
-        upcoming: Array.isArray(focusObj.upcoming) ? focusObj.upcoming.slice(0, 3).map(e => ({
+        upcoming: Array.isArray(focusObj.upcoming) ? focusObj.upcoming.slice(0, 5).map(e => ({
           title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
         })) : [],
       };
@@ -1309,28 +1310,29 @@ ${top10txt}
 
 請輸出一個 JSON 物件，格式如下：
 {
-  "summary": "一段話總結今天美股整體盤勢(70字內，提到資金流向、領漲領跌族群、大盤氛圍)",
+  "summary": "一段完整的盤勢總結(120-160字，像財經晨報的開場：先講三大指數(道瓊/標普/那斯達克)漲跌與費半，再講今天資金主軸與領漲領跌族群，最後點出市場氛圍與故事線。要寫成通順的一整段，不是條列)",
   "happened": [
-    {"title": "已發生事件標題(20字內，要點出主角公司或主題)", "desc": "事件說明(50字內)", "date": "事件日期如6/25或今天"}
+    {"title": "已發生事件標題(20字內，要點出主角公司或主題)", "desc": "事件說明(60-80字，要有來龍去脈、數字、為何影響股價)", "date": "事件日期如6/25或今天"}
   ],
   "upcoming": [
-    {"title": "即將到來事件標題(20字內)", "desc": "事件說明(50字內)", "date": "預計日期如6/27或本週四"}
+    {"title": "即將到來事件標題(20字內)", "desc": "事件說明(60-80字，具體說明是什麼事、預期影響哪些族群)", "date": "預計日期如6/27或本週四"}
   ]
 }
 寫作要求（很重要，這決定內容品質）：
-1. happened 列 4-5 則「最近已經發生」的美股重大事件，必須用 Google 搜尋查到真實近期新聞。每則要「具體」：點名是哪家公司或哪個族群、發生什麼事（財報數字、併購對象、分析師調評幅度、納入/剔除指數、產品發表、政策、訂單金額等），並簡述「為什麼影響股價」。例如「Alphabet 正式納入道瓊工業指數、取代 Verizon，以藍籌身份重新評價」這種具體寫法，不要寫「科技股上漲」這種空泛句。
-2. upcoming 列 2-3 則「接下來幾天即將發生」的具體事件（即將公布的某公司財報、即將召開的會議名稱、即將出爐的經濟數據名稱與日期）。
-3. 優先寫「有明確主角、有具體內容、能解釋漲跌」的事件。查不到具體新聞的就不要硬湊空泛句。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
+1. summary 要寫得完整詳盡（120-160字），像專業財經媒體的盤後總評，把今天美股的故事說清楚（三大指數與費半漲跌、資金流向、領漲領跌族群、市場氛圍、主軸題材）。
+2. happened 列「5 則」最近已經發生的美股重大事件，必須用 Google 搜尋查到真實近期新聞。每則 desc 要寫 60-80 字、有來龍去脈：點名哪家公司或族群、發生什麼事（財報數字、併購對象與金額、分析師調評幅度與目標價、納入/剔除指數、產品發表、政策、訂單金額等），並說明為何影響股價。例如「Nvidia 公布財報營收年增超過1倍、資料中心業務創高，並上調下季財測，帶動整個 AI 半導體鏈走強」這種具體寫法，不要寫「科技股上漲」這種空泛句。
+3. upcoming 列「5 則」接下來幾天即將發生的具體事件（即將公布的某公司財報、即將召開的會議名稱、即將出爐的經濟數據名稱與日期、Fed 會議等），每則 desc 也寫 60-80 字、說明預期影響。
+4. 優先寫有明確主角、能解釋漲跌的事件。查不到的不要硬湊空泛句，但盡量湊滿5則。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
 
     const focusRaw = await callGemini(focusPrompt, true);   // true = 開 Google 搜尋
     const focusObj = parseGeminiJson(focusRaw);
     if (focusObj && typeof focusObj === 'object') {
       marketFocus = {
         summary: typeof focusObj.summary === 'string' ? focusObj.summary : '',
-        happened: Array.isArray(focusObj.happened) ? focusObj.happened.slice(0, 4).map(e => ({
+        happened: Array.isArray(focusObj.happened) ? focusObj.happened.slice(0, 5).map(e => ({
           title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
         })) : [],
-        upcoming: Array.isArray(focusObj.upcoming) ? focusObj.upcoming.slice(0, 3).map(e => ({
+        upcoming: Array.isArray(focusObj.upcoming) ? focusObj.upcoming.slice(0, 5).map(e => ({
           title: String(e.title || ''), desc: String(e.desc || ''), date: String(e.date || ''),
         })) : [],
       };
