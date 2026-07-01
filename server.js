@@ -1051,10 +1051,24 @@ app.get("/api/article", async (req, res) => {
     const html = await fetchHtml(url);
     if (!html) return res.status(502).json({ ok: false, error: "fetch failed" });
     const { document } = parseHTML(html);
+
+    // 優先：富聯網內文固定在 #NewsMainContent，直接鎖它（快、準，跳過 Readability 評分）
+    const main = document.getElementById("NewsMainContent");
+    if (main) {
+      const title = (document.querySelector("h1")?.textContent || document.title || "").trim();
+      main.querySelectorAll("script, style, iframe").forEach(el => el.remove());
+      main.querySelectorAll("h1, h2").forEach(el => el.remove());   // 移除內文重複主標題（前端已用列表標題顯示）
+      const content = main.innerHTML.trim();
+      const text = main.textContent.replace(/\s+/g, " ").trim();
+      if (content) return res.json({ ok: true, via: "container", title, content, text, excerpt: text.slice(0, 120) });
+    }
+
+    // 退回：Readability 通用萃取（找不到容器、或其他來源時）
     const article = new Readability(document).parse();
     if (!article || !article.content) return res.json({ ok: false, error: "parse failed" });
     res.json({
       ok: true,
+      via: "readability",
       title: article.title || "",
       content: article.content || "",      // 乾淨內文 HTML（前端用 CSS 隱藏圖片）
       text: article.textContent || "",
