@@ -1138,14 +1138,16 @@ function usPrevTradingDate(offsetDays = 0) {
   return d.toISOString().slice(0, 10);
 }
 
-// 抓某一個 type 的清單（分頁）；回 {set, names, complete}
-async function fetchTickerType(type) {
+async function fetchUsStockWhitelist() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_csCache.date === today && _csCache.set) return _csCache;
   const set = new Set(); const names = {};
-  let url = `${POLY_BASE}/v3/reference/tickers?type=${type}&market=stocks&active=true&limit=1000&apiKey=${POLYGON_KEY}`;
-  let pages = 0, complete = true;
+  let url = `${POLY_BASE}/v3/reference/tickers?type=CS&market=stocks&active=true&limit=1000&apiKey=${POLYGON_KEY}`;
+  let pages = 0;
+  let complete = true;   // 是否完整抓完（中途沒失敗）
   while (url && pages < 12) {
     const r = await fetch(url);
-    if (!r.ok) { complete = false; break; }   // 某頁失敗 → 標記不完整
+    if (!r.ok) { complete = false; break; }   // 某頁失敗 → 標記不完整、不快取
     const j = await r.json();
     for (const t of (j.results || [])) {
       const name = t.name || "";
@@ -1155,24 +1157,13 @@ async function fetchTickerType(type) {
     pages++;
     url = j.next_url ? `${j.next_url}&apiKey=${POLYGON_KEY}` : null;
   }
-  return { set, names, complete };
-}
-
-async function fetchUsStockWhitelist() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (_csCache.date === today && _csCache.set) return _csCache;
-  const cs  = await fetchTickerType("CS");     // 普通股
-  const adr = await fetchTickerType("ADRC");    // ADR（台積電TSM、ASML、BABA 這種存託憑證）
-  const set = new Set([...cs.set, ...adr.set]);
-  const names = { ...cs.names, ...adr.names };
-  const complete = cs.complete && adr.complete;
-  // 只有「兩邊都完整抓完 + 普通股數量合理(>3000)」才快取一整天；否則本次用、但不快取，下次重抓
+  // 只有「完整抓完且數量合理(>3000)」才快取一整天；否則本次用、但不快取，下次重抓
   // （避免某頁失敗把不完整名單快取一天，導致字母後段股如 WDC/XOM 整天被漏掉）
   const fresh = { date: today, set, names };
-  if (complete && cs.set.size > 3000) {
+  if (complete && set.size > 3000) {
     _csCache = fresh;
   }
-  console.log(`美股白名單：CS ${cs.set.size} + ADR ${adr.set.size} = ${set.size} 檔${complete ? "" : "（不完整,未快取）"}`);
+  console.log(`美股白名單(type=CS)：${set.size} 檔${complete ? "" : "（不完整,未快取）"}`);
   return fresh;
 }
 
