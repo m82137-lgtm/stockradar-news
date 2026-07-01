@@ -1055,10 +1055,11 @@ app.get("/api/article", async (req, res) => {
     // 優先：富聯網內文固定在 #NewsMainContent，直接鎖它（快、準，跳過 Readability 評分）
     const main = document.getElementById("NewsMainContent");
     if (main) {
-      const title = (document.querySelector("h1")?.textContent || document.title || "").trim();
-      main.querySelectorAll("script, style, iframe").forEach(el => el.remove());
+      // 標題用頁面 <title> 去掉「_富聯網」尾綴（querySelector h1 會抓到導覽選單，故不用）
+      const title = (document.title || document.querySelector("h1")?.textContent || "").replace(/\s*[_|｜-]\s*富聯網\s*$/, "").trim();
+      main.querySelectorAll('script, style, iframe, ins, [id^="onead"]').forEach(el => el.remove());  // 清廣告位/腳本
       main.querySelectorAll("h1, h2").forEach(el => el.remove());   // 移除內文重複主標題（前端已用列表標題顯示）
-      const content = main.innerHTML.trim();
+      const content = main.innerHTML.replace(/<!--[\s\S]*?-->/g, "").trim();   // 清 HTML 註解
       const text = main.textContent.replace(/\s+/g, " ").trim();
       if (content) return res.json({ ok: true, via: "container", title, content, text, excerpt: text.slice(0, 120) });
     }
