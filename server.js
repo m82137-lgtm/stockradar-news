@@ -1,5 +1,7 @@
 import express from "express";
 import cron from "node-cron";
+import { Readability } from "@mozilla/readability";
+import { parseHTML } from "linkedom";
 
 const app = express();
 
@@ -1030,6 +1032,33 @@ app.get("/api/sectors", async (req, res) => {
     }]);
   } catch (e) {
     res.json([{ time: now(), keyword: "富聯網 熱門族群", items: [] }]);
+  }
+});
+
+// ── 內文閱讀器：抓富聯網文章 → Readability 萃取乾淨內文（熱門族群閱讀器用）──
+// 白名單只放 money-link（擋 SSRF）；linkedom 造 DOM + Readability 抽本體，只回文字/HTML。
+const ARTICLE_ALLOW_RE = /(^|\.)money-link\.com\.tw$/i;
+app.get("/api/article", async (req, res) => {
+  try {
+    const url = String(req.query.url || "").trim();
+    let host;
+    try { host = new URL(url).hostname; } catch { return res.status(400).json({ ok: false, error: "bad url" }); }
+    if (!ARTICLE_ALLOW_RE.test(host)) return res.status(403).json({ ok: false, error: "domain not allowed" });
+    const html = await fetchHtml(url);
+    if (!html) return res.status(502).json({ ok: false, error: "fetch failed" });
+    const { document } = parseHTML(html);
+    const article = new Readability(document).parse();
+    if (!article || !article.content) return res.json({ ok: false, error: "parse failed" });
+    res.json({
+      ok: true,
+      title: article.title || "",
+      content: article.content || "",      // 乾淨內文 HTML（前端用 CSS 隱藏圖片）
+      text: article.textContent || "",
+      excerpt: article.excerpt || ""
+    });
+  } catch (e) {
+    console.error("/api/article error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 

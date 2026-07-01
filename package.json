@@ -7,7 +7,9 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "express": "^4.19.2",
+    "linkedom": "^0.18.12",
     "node-cron": "^3.0.3"
   },
   "engines": {
