@@ -1219,15 +1219,15 @@ async function buildUsTop50() {
 
     const rows = [];
     for (const [ticker, d] of grouped.map) {
-      if (!wl.set.has(ticker)) continue;
-      if (isUsEtf(ticker)) continue;            // 排除 ETF（保險層，擋 Polygon 誤標成 CS 的 ETF）
+      // 白名單只當「名稱來源」，不再過濾誰進榜 → 當天有成交就納入，WDC/XOM 等 W~Z 股不再被漏
+      if (isUsEtf(ticker)) continue;            // 排除 ETF（US_ETF_SET 寫死名單，含 SPY/QQQ/TQQQ/SOXL 等高成交，不讓 ETF 霸榜）
       const close = d.c || 0, vol = d.v || 0, vwap = d.vw || close;
       if (close <= 0 || vol <= 0) continue;
       let chgPct = 0;
       const p = prev.ok ? prev.map.get(ticker) : null;
       if (p && p.c > 0) chgPct = ((close - p.c) / p.c) * 100;
       rows.push({
-        code: ticker, name: wl.names[ticker] || ticker,
+        code: ticker, name: wl.names[ticker] || ticker,   // 名稱來自白名單；抓不到(如限流漏掉的W~Z)則顯示代號
         price: Math.round(close * 100) / 100,
         chg: Math.round(chgPct * 100) / 100,
         dollarVol: Math.round(vwap * vol), vol,
