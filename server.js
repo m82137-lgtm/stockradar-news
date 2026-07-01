@@ -722,9 +722,13 @@ async function buildTwTop50() {
     top50 = top50.map(s => {
       const h = hist[s.code];
       const isNew = !isFirstRun && !prevCodes.has(s.code);
-      const days = h ? (h.days || 1) + 1 : 1;
-      const rankChange = h && h.lastRank ? (h.lastRank - s.rank) : 0;
-      newHist[s.code] = { days, lastRank: s.rank, firstDate: h?.firstDate || date };
+      // 換日才進位：同一天重複 build 不再累加 days、也不把 rankChange 洗成0
+      const isNewDay = !h || h.lastDate !== date;
+      const days = h ? (isNewDay ? (h.days || 1) + 1 : (h.days || 1)) : 1;
+      // 排名變化 = 昨天名次 − 今天名次；換日時「昨天名次」=h.lastRank，同日重算用已存的 prevRank
+      const prevRank = h ? (isNewDay ? (h.lastRank ?? null) : (h.prevRank ?? null)) : null;
+      const rankChange = prevRank ? (prevRank - s.rank) : 0;
+      newHist[s.code] = { days, lastRank: s.rank, prevRank, lastDate: date, firstDate: h?.firstDate || date };
       return { ...s, days, isNew, rankChange };
     });
     await kvPut("tw_history", newHist, 86400 * 30);
@@ -1140,9 +1144,10 @@ async function fetchUsStockWhitelist() {
   const set = new Set(); const names = {};
   let url = `${POLY_BASE}/v3/reference/tickers?type=CS&market=stocks&active=true&limit=1000&apiKey=${POLYGON_KEY}`;
   let pages = 0;
-  while (url && pages < 8) {
+  let complete = true;   // 是否完整抓完（中途沒失敗）
+  while (url && pages < 12) {
     const r = await fetch(url);
-    if (!r.ok) break;
+    if (!r.ok) { complete = false; break; }   // 某頁失敗 → 標記不完整、不快取
     const j = await r.json();
     for (const t of (j.results || [])) {
       const name = t.name || "";
@@ -1152,9 +1157,14 @@ async function fetchUsStockWhitelist() {
     pages++;
     url = j.next_url ? `${j.next_url}&apiKey=${POLYGON_KEY}` : null;
   }
-  _csCache = { date: today, set, names };
-  console.log(`美股白名單(type=CS)：${set.size} 檔`);
-  return _csCache;
+  // 只有「完整抓完且數量合理(>3000)」才快取一整天；否則本次用、但不快取，下次重抓
+  // （避免某頁失敗把不完整名單快取一天，導致字母後段股如 WDC/XOM 整天被漏掉）
+  const fresh = { date: today, set, names };
+  if (complete && set.size > 3000) {
+    _csCache = fresh;
+  }
+  console.log(`美股白名單(type=CS)：${set.size} 檔${complete ? "" : "（不完整,未快取）"}`);
+  return fresh;
 }
 
 async function fetchGroupedDaily(date) {
@@ -1223,9 +1233,13 @@ async function buildUsTop50() {
       const h = hist[s.code];
       // 新進榜：昨天快照沒有這檔（且非第一次跑，第一次無對照基準不標NEW）
       const isNew = !isFirstRun && !prevCodes.has(s.code);
-      const days = h ? (h.days || 1) + 1 : 1;
-      const rankChange = h && h.lastRank ? (h.lastRank - s.rank) : 0;
-      newHist[s.code] = { days, lastRank: s.rank, firstDate: h?.firstDate || date };
+      // 換日才進位：同一天重複 build 不再累加 days、也不把 rankChange 洗成0
+      const isNewDay = !h || h.lastDate !== date;
+      const days = h ? (isNewDay ? (h.days || 1) + 1 : (h.days || 1)) : 1;
+      // 排名變化 = 昨天名次 − 今天名次；換日時「昨天名次」=h.lastRank，同日重算用已存的 prevRank
+      const prevRank = h ? (isNewDay ? (h.lastRank ?? null) : (h.prevRank ?? null)) : null;
+      const rankChange = prevRank ? (prevRank - s.rank) : 0;
+      newHist[s.code] = { days, lastRank: s.rank, prevRank, lastDate: date, firstDate: h?.firstDate || date };
       return { ...s, days, isNew, rankChange };
     });
     await kvPut("us_history", newHist, 86400 * 30);
