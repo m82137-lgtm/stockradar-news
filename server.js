@@ -684,6 +684,18 @@ function twTradingDate(offsetDays = 0) {
 // ── 定榜比對（台/美共用）：NEW、▲▼、在榜天數一律跟「昨天定榜」比 ──
 // 規則：同一天不管重建幾次，基準都是昨天 → NEW 整天不被洗掉、▲▼ 穩定、天數=昨天+1
 // 缺角回看：若昨天定榜櫃買數=0（tpex 抽風日），該檔查無時自動往前多翻（最多共4份）
+// 距離「下一個台灣 hour:min」的秒數（跳過週六日；與 Worker 同款，供 KV 過期用）
+function ttlUntilTw(hour, min) {
+  const TW = 8 * 60 * 60 * 1000;
+  const now = new Date(Date.now() + TW);                 // 以 UTC 取值代表台灣時間
+  const target = new Date(now.getTime());
+  target.setUTCHours(hour, min, 0, 0);
+  if (target.getTime() <= now.getTime()) target.setUTCDate(target.getUTCDate() + 1); // 已過 → 明天
+  let dow = target.getUTCDay();
+  while (dow === 0 || dow === 6) { target.setUTCDate(target.getUTCDate() + 1); dow = target.getUTCDay(); } // 跳過六日
+  return Math.max(3600, Math.round((target.getTime() - now.getTime()) / 1000));      // 至少 1 小時
+}
+
 function shiftDateStr(dateStr, days) {
   const d = new Date(dateStr + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
@@ -774,10 +786,39 @@ async function buildTwTop50() {
     if (mRoc) date = `${+mRoc[1] + 1911}-${mRoc[2]}-${mRoc[3]}`;
     else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) date = rawDate.slice(0, 10);
 
-    // ── 合併、排除 ETF（代碼開頭 00，如 0050/0056/00878）、依成交值排序、取前50 ──
+    // ── 合併、依成交值排序（掃描池不濾 ETF，與原 Worker 行為一致）──
+    const merged = [...tseData, ...otcData].filter(s => s.tradeValue > 0);
+    merged.sort((a, b) => b.tradeValue - a.tradeValue);
+
+    // ── 盤後一條龍（原 Worker buildDailyData 職責搬來這裡，格式/TTL 完全一致）──
+    // ① 股號→股名對照表（全台股，個股新聞查詢用）
+    try {
+      const codeNameMap = {};
+      for (const s of merged) { if (s.code && s.name) codeNameMap[s.code] = { name: s.name, market: s.market }; }
+      await kvPut("code_name_map", codeNameMap, 86400 * 3);
+    } catch (e) { console.error("code_name_map error:", e.message); }
+    // ② pending_stocklist：前120，隔天盤中警示池（08:30 由 Worker finalize 啟用）
+    const pool = merged.slice(0, 120).map(s => ({
+      code: s.code, name: s.name, market: s.market,
+      prevLimit: s.chgPct >= 9.5,
+      prevVol: s.vol || 0,
+    }));
+    await kvPut("pending_stocklist", pool, ttlUntilTw(9, 0));
+    // ③ afterhours：前60名中漲幅≥7%（盤後追蹤頁）
+    const surging = merged.slice(0, 60)
+      .filter(s => s.chgPct >= 7)
+      .sort((a, b) => b.chgPct - a.chgPct)
+      .map(s => ({
+        code: s.code, name: s.name, market: s.market,
+        price: s.close, chg: s.chgPct, vol: s.vol, tradeValue: s.tradeValue,
+        prevLimit: s.chgPct >= 9.5, prevVol: s.vol || 0,
+      }));
+    await kvPut("afterhours", surging, ttlUntilTw(14, 0));
+    console.log(`盤後一條龍：對照表${merged.length}檔、掃描池${pool.length}檔、盤後追蹤${surging.length}檔`);
+
+    // ── Top50：排除 ETF（代碼開頭 00，如 0050/0056/00878）──
     const isTwEtf = (code) => /^00/.test(String(code));   // 台股 ETF 代碼開頭 00
-    const all = [...tseData, ...otcData].filter(s => s.tradeValue > 0 && s.close > 0 && !isTwEtf(s.code));
-    all.sort((a, b) => b.tradeValue - a.tradeValue);
+    const all = merged.filter(s => s.close > 0 && !isTwEtf(s.code));
     let top50 = all.slice(0, 50).map((s, i) => ({
       rank: i + 1,
       code: s.code, name: s.name, market: s.market,
@@ -818,7 +859,7 @@ app.get("/api/tw-rebuild", async (req, res) => {
     if (r && r.ok && r.data && r.data.length) {
       buildTwAnalysis(r.data, r.date).catch(e => console.error("tw analysis bg:", e.message));
     }
-    res.json({ ok: r.ok, date: r.date, count: r.count, otcCount: r.otcCount, note: r.ok ? `台股Top50已更新（榜內上櫃 ${r.otcCount} 檔），AI題材分析背景生成中` : r.error });
+    res.json({ ok: r.ok, date: r.date, count: r.count, otcCount: r.otcCount, note: r.ok ? `台股Top50已更新（榜內上櫃 ${r.otcCount} 檔），120檔掃描池與盤後追蹤已同步重建，AI題材分析背景生成中` : r.error });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
