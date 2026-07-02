@@ -681,6 +681,18 @@ function twTradingDate(offsetDays = 0) {
   return tw.toISOString().slice(0, 10);
 }
 
+// 萬用台股日期解析：吃 115/07/03、1150703、115年07月03日、2026-07-03、2026/07/03、20260703
+// 解析成功回 YYYY-MM-DD，失敗回 null（榜日一律認資料，解析不到才推定）
+function parseTwDate(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{3})[\/年.\-]?(\d{2})[\/月.\-]?(\d{2})/);        // 民國 3碼開頭
+  if (m && +m[1] < 200) return `${+m[1] + 1911}-${m[2]}-${m[3]}`;
+  m = s.match(/^(\d{4})[\/\-.]?(\d{2})[\/\-.]?(\d{2})/);               // 西元 4碼開頭
+  if (m && +m[1] > 1990 && +m[1] < 2100) return `${m[1]}-${m[2]}-${m[3]}`;
+  return null;
+}
+
 // ── 定榜比對（台/美共用）：NEW、▲▼、在榜天數一律跟「昨天定榜」比 ──
 // 規則：同一天不管重建幾次，基準都是昨天 → NEW 整天不被洗掉、▲▼ 穩定、天數=昨天+1
 // 缺角回看：若昨天定榜櫃買數=0（tpex 抽風日），該檔查無時自動往前多翻（最多共4份）
@@ -778,13 +790,18 @@ async function buildTwTop50() {
     if (!otcData.length) console.log(`⚠️ 櫃買抓不到（status=${otc.status ?? "-"} head=${(otc.head || "").slice(0, 120)}），本次為純上市資料；缺角回看會保護天數，可用說明頁按鈕手動重跑`);
     if (!tseData.length) console.log(`⚠️ 上市抓不到（status=${tse.status ?? "-"}），本次為純上櫃資料`);
 
-    // 日期：以上市資料的日期為準（民國年轉西元），抓不到就用台灣當天
-    let date = twTradingDate(0);
+    // 榜日一律認「資料自己的交易日」（民國/西元/無斜線格式都吃）；
+    // 資料真的沒帶日期才推定：台灣 14:00 前＝今天還沒收盤 → 記前一交易日，之後才記今天。
+    // 這樣不管幾點按手動重建，7/2 的資料永遠寫進 7/2 那格、跟 7/1 比，NEW/▲▼/天數不會被洗。
     const rawDate = tse.date || otc.date || "";
-    // TWSE 日期格式可能是「115/06/30」(民國) 或 ISO，櫃買是 ISO。統一轉 YYYY-MM-DD
-    const mRoc = rawDate.match(/^(\d{3})\/(\d{2})\/(\d{2})$/);
-    if (mRoc) date = `${+mRoc[1] + 1911}-${mRoc[2]}-${mRoc[3]}`;
-    else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) date = rawDate.slice(0, 10);
+    let date = parseTwDate(rawDate);
+    let dateSrc = date ? (tse.date ? "TSE" : "OTC") : "";
+    if (!date) {
+      const twNow = new Date(Date.now() + 8 * 3600 * 1000);
+      date = twTradingDate(twNow.getUTCHours() < 14 ? 1 : 0);
+      dateSrc = "推定";
+    }
+    console.log(`台股榜日=${date}（來源:${dateSrc}，raw="${String(rawDate).slice(0, 20)}"）`);
 
     // ── 合併、依成交值排序（掃描池不濾 ETF，與原 Worker 行為一致）──
     const merged = [...tseData, ...otcData].filter(s => s.tradeValue > 0);
