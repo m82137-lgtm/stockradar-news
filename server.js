@@ -24,6 +24,7 @@ const KV_API = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/s
 // Telegram 推播設定（存 Render 環境變數；沒設則靜默不推，不影響新聞功能）
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
+const FINMIND_TOKEN = process.env.FINMIND_TOKEN || "";   // FinMind 金鑰（沒填也能跑，額度較低）
 
 const HOT_SECTOR_KEEP_DAYS = 30;
 
@@ -681,28 +682,197 @@ function twTradingDate(offsetDays = 0) {
   return tw.toISOString().slice(0, 10);
 }
 
+// ── FinMind（台股日資料主力來源）──────────────────────
+// 免費版 300 次/hr、帶 token 600 次/hr；本站一天只打個位數次，額度綽綽有餘。
+// 資料每交易日 17:30 左右更新，故台股 cron 排 17:45 主跑 + 18:30 補跑。
+async function finmindGet(dataset, params = {}) {
+  const qs = new URLSearchParams({ dataset, ...params });
+  const url = `https://api.finmindtrade.com/api/v4/data?${qs.toString()}`;
+  const headers = { "User-Agent": BROWSER_UA, "Accept": "application/json" };
+  if (FINMIND_TOKEN) headers["Authorization"] = `Bearer ${FINMIND_TOKEN}`;
+  try {
+    const r = await fetch(url, { headers });
+    const status = r.status;
+    const text = await r.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    if (!json || json.status !== 200 || !Array.isArray(json.data)) {
+      return { ok: false, status, msg: json && json.msg, head: text.slice(0, 200), data: [] };
+    }
+    return { ok: true, status, data: json.data };
+  } catch (e) {
+    return { ok: false, status: 0, msg: e.message, data: [] };
+  }
+}
+
+// 股票總覽對照表（股號→股名+市場）：用來分上市/上櫃、濾掉興櫃與權證，並補股名
+// KV 快取 7 天內直接用；過期才重抓，抓失敗沿用舊的
+async function getTwStockInfo() {
+  let cached = null;
+  try { cached = await kvGet("tw_stock_info"); } catch {}
+  if (cached && cached.map && Object.keys(cached.map).length > 500 &&
+      cached.updatedAt && (Date.now() - cached.updatedAt) < 86400e3 * 7) {
+    return cached.map;
+  }
+  const r = await finmindGet("TaiwanStockInfo");
+  if (!r.ok) {
+    console.log(`FinMind TaiwanStockInfo 失敗 status=${r.status} msg=${r.msg || "-"} head=${(r.head || "").slice(0, 120)}`);
+    return cached && cached.map ? cached.map : null;   // 沿用舊表
+  }
+  const map = {};
+  for (const row of r.data) {
+    const code = String(row.stock_id || "").trim();
+    if (!/^\d{4}$/.test(code)) continue;                       // 只收 4 碼（排除權證等）
+    const t = String(row.type || "").toLowerCase();
+    if (t !== "twse" && t !== "tpex") continue;                // 排除興櫃(emerging)等
+    map[code] = { name: String(row.stock_name || "").trim(), market: t === "twse" ? "TSE" : "OTC" };
+  }
+  if (Object.keys(map).length > 500) {
+    await kvPut("tw_stock_info", { updatedAt: Date.now(), map }, 86400 * 30);
+    console.log(`FinMind 股票總覽對照表更新：${Object.keys(map).length} 檔（上市+上櫃）`);
+    return map;
+  }
+  console.log(`FinMind TaiwanStockInfo 筆數異常（${Object.keys(map).length}），沿用舊表`);
+  return cached && cached.map ? cached.map : null;
+}
+
+// 抓指定日期的全市場日成交（上市+上櫃，欄位對齊舊格式）
+async function fetchFinmindDaily(dateStr) {
+  const r = await finmindGet("TaiwanStockPrice", { start_date: dateStr, end_date: dateStr });
+  if (!r.ok) return { ok: false, status: r.status, msg: r.msg, head: r.head, data: [] };
+  const infoMap = await getTwStockInfo();
+  if (!infoMap) return { ok: false, status: r.status, msg: "股票總覽對照表取得失敗", data: [] };
+  const data = [];
+  for (const row of r.data) {
+    const code = String(row.stock_id || "").trim();
+    const info = infoMap[code];
+    if (!info) continue;                                        // 非上市/上櫃 → 跳過
+    const close = +row.close || 0;
+    const spread = +row.spread || 0;                            // 漲跌價差
+    const tradeValue = +row.Trading_money || 0;
+    const volume = +row.Trading_Volume || 0;
+    if (close <= 0 || tradeValue <= 0) continue;
+    const prevClose = close - spread;
+    const chgPct = prevClose > 0 ? +((spread / prevClose) * 100).toFixed(2) : 0;
+    data.push({ code, name: info.name, market: info.market, close, chgPct, vol: Math.round(volume / 1000), tradeValue });
+  }
+  return { ok: true, status: r.status, date: dateStr, count: data.length, data };
+}
+
+// 台股全市場日資料：FinMind 主力 → 失敗退回 TWSE+tpex 官方備援
+async function fetchTwDailyMerged() {
+  const fmDate = twTradingDate(0);
+  const fm = await fetchFinmindDaily(fmDate);
+  if (fm.ok && fm.data.length >= 500) {
+    const otcN = fm.data.filter(s => s.market === "OTC").length;
+    console.log(`台股日資料：FinMind date=${fmDate} 共${fm.data.length}檔（OTC ${otcN}）`);
+    return { ok: true, source: "finmind", date: fmDate, data: fm.data };
+  }
+  console.log(`FinMind 台股日資料不可用（status=${fm.status ?? "-"} msg=${fm.msg || "-"} count=${fm.data.length} head=${(fm.head || "").slice(0, 120)}），改走官方備援`);
+  const [tse, otc] = await Promise.all([
+    fetchTseDaily().catch(e => { console.error("fetchTseDaily error:", e.message); return { ok: false, data: [] }; }),
+    fetchOtcDaily().catch(e => { console.error("fetchOtcDaily error:", e.message); return { ok: false, data: [] }; }),
+  ]);
+  const tseData = (tse.ok && Array.isArray(tse.data)) ? tse.data : [];
+  const otcData = (otc.ok && Array.isArray(otc.data)) ? otc.data : [];
+  if (!tseData.length && !otcData.length) return { ok: false, error: "FinMind 與官方來源皆無資料", data: [] };
+  if (!otcData.length) console.log(`⚠️ 官方備援路櫃買也抓不到（status=${otc.status ?? "-"} head=${(otc.head || "").slice(0, 120)}），本次為純上市資料`);
+  let date = twTradingDate(0);
+  const rawDate = tse.date || otc.date || "";
+  const mRoc = rawDate.match(/^(\d{3})\/(\d{2})\/(\d{2})$/);
+  if (mRoc) date = `${+mRoc[1] + 1911}-${mRoc[2]}-${mRoc[3]}`;
+  else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) date = rawDate.slice(0, 10);
+  return { ok: true, source: "twse+tpex", date, data: [...tseData, ...otcData] };
+}
+
+// ── 定榜比對（台/美共用）：NEW、▲▼、在榜天數一律跟「昨天定榜」比 ──
+// 規則：同一天不管重建幾次，基準都是昨天 → NEW 整天不被洗掉、▲▼ 穩定、天數=昨天+1
+// 缺角回看：若昨天定榜櫃買數=0（tpex 抽風日），該檔查無時自動往前多翻（最多共4份）
+function shiftDateStr(dateStr, days) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+async function applyBoardHistory(kvKey, date, top50, otcTester) {
+  let store = null;
+  try { store = await kvGet(kvKey); } catch {}
+  // ── 首次遷移：從舊 tw_history / us_history 建基準，保留既有天數 ──
+  if (!store || !Array.isArray(store.dates)) {
+    store = { dates: [], boards: {} };
+    const legacyKey = kvKey === "tw_board_history" ? "tw_history" : "us_history";
+    let legacy = null;
+    try { legacy = await kvGet(legacyKey); } catch {}
+    if (legacy && typeof legacy === "object") {
+      let base = "";
+      for (const c in legacy) { const d = legacy[c] && legacy[c].lastDate; if (d && d > base) base = d; }
+      if (base) {
+        const sameDay = base === date;                          // 舊帳寫到今天 → 掛成「昨天」當基準
+        const pseudoDate = sameDay ? shiftDateStr(base, -1) : base;
+        const list = {};
+        for (const c in legacy) {
+          const h = legacy[c];
+          if (!h || h.lastDate !== base) continue;
+          const rank = sameDay ? (h.prevRank ?? h.lastRank) : h.lastRank;
+          const days = Math.max(1, (h.days || 1) - (sameDay ? 1 : 0));
+          if (rank) list[c] = { rank, days };
+        }
+        if (Object.keys(list).length) {
+          store.dates = [pseudoDate];
+          store.boards[pseudoDate] = { otcCount: -1, list };     // -1=未知（遷移資料），視為完整
+          console.log(`${kvKey} 首次遷移：以 ${base} 舊帳建基準（${Object.keys(list).length} 檔，掛在 ${pseudoDate}）`);
+        }
+      }
+    }
+  }
+  // ── 取昨天以前的定榜鏈（最近在前，最多翻 4 份）──
+  const prevDates = store.dates.filter(d => d < date).sort().reverse().slice(0, 4);
+  const chain = prevDates.map(d => store.boards[d]).filter(b => b && b.list);
+  const findPrev = (code) => {
+    for (const b of chain) {
+      const hit = b.list[code];
+      if (hit) return hit;
+      if (b.otcCount !== 0) return null;   // 這份是完整榜還查無 → 真的不在榜；缺角榜(0)才往前翻
+    }
+    return null;
+  };
+  const out = top50.map(s => {
+    const prev = findPrev(s.code);
+    const days = prev ? (prev.days || 1) + 1 : 1;
+    const isNew = chain.length > 0 && !prev;
+    const rankChange = prev && prev.rank ? (prev.rank - s.rank) : 0;
+    return { ...s, days, isNew, rankChange };
+  });
+  // ── 寫回今天定榜（同日重建覆蓋沒差，因為基準固定是昨天）──
+  const list = {};
+  let otcN = 0;
+  for (const s of out) {
+    list[s.code] = { rank: s.rank, days: s.days };
+    if (otcTester && otcTester(s)) otcN++;
+  }
+  if (!store.dates.includes(date)) store.dates.push(date);
+  store.boards[date] = { otcCount: otcTester ? otcN : -1, list };
+  store.dates.sort();
+  while (store.dates.length > 6) { const drop = store.dates.shift(); delete store.boards[drop]; }
+  await kvPut(kvKey, store, 86400 * 30);
+  return out;
+}
+
 async function buildTwTop50() {
   try {
-    // ── 抓上市 + 上櫃（都在 Render）──
-    const [tse, otc] = await Promise.all([
-      fetchTseDaily().catch(e => { console.error("fetchTseDaily error:", e.message); return { ok: false, data: [] }; }),
-      fetchOtcDaily().catch(e => { console.error("fetchOtcDaily error:", e.message); return { ok: false, data: [] }; }),
-    ]);
-    const tseData = (tse.ok && Array.isArray(tse.data)) ? tse.data : [];
-    const otcData = (otc.ok && Array.isArray(otc.data)) ? otc.data : [];
-    if (!tseData.length && !otcData.length) return { ok: false, error: "台股上市櫃皆無資料", data: [] };
+    // ── 抓全市場日資料：FinMind 主力 → 官方備援（來源與死因都會留在 log）──
+    const src = await fetchTwDailyMerged();
+    if (!src.ok) return { ok: false, error: src.error || "台股日資料皆無法取得", data: [] };
+    const date = src.date;
 
-    // 日期：以上市資料的日期為準（民國年轉西元），抓不到就用台灣當天
-    let date = twTradingDate(0);
-    const rawDate = tse.date || otc.date || "";
-    // TWSE 日期格式可能是「115/06/30」(民國) 或 ISO，櫃買是 ISO。統一轉 YYYY-MM-DD
-    const mRoc = rawDate.match(/^(\d{3})\/(\d{2})\/(\d{2})$/);
-    if (mRoc) date = `${+mRoc[1] + 1911}-${mRoc[2]}-${mRoc[3]}`;
-    else if (/^\d{4}-\d{2}-\d{2}/.test(rawDate)) date = rawDate.slice(0, 10);
+    // ── 存全市場合併資料（給 Worker 盤後建池用：/api/tw-daily-all）──
+    await kvPut("tw_daily_all", {
+      ok: true, date, source: src.source, updatedAt: Date.now(),
+      count: src.data.length, data: src.data,
+    }, 86400 * 3);
 
-    // ── 合併、排除 ETF（代碼開頭 00，如 0050/0056/00878）、依成交值排序、取前50 ──
-    const isTwEtf = (code) => /^00/.test(String(code));   // 台股 ETF 代碼開頭 00
-    const all = [...tseData, ...otcData].filter(s => s.tradeValue > 0 && s.close > 0 && !isTwEtf(s.code));
+    // ── 排除 ETF（代碼開頭 00）、依成交值排序、取前50 ──
+    const isTwEtf = (code) => /^00/.test(String(code));
+    const all = src.data.filter(s => s.tradeValue > 0 && s.close > 0 && !isTwEtf(s.code));
     all.sort((a, b) => b.tradeValue - a.tradeValue);
     let top50 = all.slice(0, 50).map((s, i) => ({
       rank: i + 1,
@@ -713,32 +883,13 @@ async function buildTwTop50() {
       vol: s.vol,
     }));
 
-    // ── 在榜天數 + 排名變化 + NEW（比照美股）──
-    const snap = (await kvGet("tw_prev_top50")) || { date: "", codes: [] };
-    const prevCodes = new Set(snap.codes || []);
-    const isFirstRun = !snap.date;
-    const hist = (await kvGet("tw_history")) || {};
-    const newHist = {};
-    top50 = top50.map(s => {
-      const h = hist[s.code];
-      const isNew = !isFirstRun && !prevCodes.has(s.code);
-      // 換日才進位：同一天重複 build 不再累加 days、也不把 rankChange 洗成0
-      const isNewDay = !h || h.lastDate !== date;
-      const days = h ? (isNewDay ? (h.days || 1) + 1 : (h.days || 1)) : 1;
-      // 排名變化 = 昨天名次 − 今天名次；換日時「昨天名次」=h.lastRank，同日重算用已存的 prevRank
-      const prevRank = h ? (isNewDay ? (h.lastRank ?? null) : (h.prevRank ?? null)) : null;
-      const rankChange = prevRank ? (prevRank - s.rank) : 0;
-      newHist[s.code] = { days, lastRank: s.rank, prevRank, lastDate: date, firstDate: h?.firstDate || date };
-      return { ...s, days, isNew, rankChange };
-    });
-    await kvPut("tw_history", newHist, 86400 * 30);
-    if (snap.date !== date) {
-      await kvPut("tw_prev_top50", { date, codes: top50.map(s => s.code) }, 86400 * 7);
-    }
+    // ── NEW / ▲▼ / 在榜天數：一律跟「昨天定榜」比（缺角自動回看）──
+    top50 = await applyBoardHistory("tw_board_history", date, top50, s => s.market === "OTC");
 
-    const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
+    const otcCount = top50.filter(s => s.market === "OTC").length;
+    const result = { ok: true, date, source: src.source, otcCount, count: top50.length, updatedAt: Date.now(), data: top50 };
     await kvPut("tw_top50", result, 86400 * 3);
-    console.log(`台股Top50：date=${date} 共${top50.length}檔（TSE ${tseData.length}+OTC ${otcData.length}），新進榜${top50.filter(s => s.isNew).length}檔`);
+    console.log(`台股Top50：date=${date} source=${src.source} 共${top50.length}檔（榜內OTC ${otcCount}），新進榜${top50.filter(s => s.isNew).length}檔`);
     return result;
   } catch (e) {
     console.error("buildTwTop50 error:", e.message);
@@ -763,7 +914,7 @@ app.get("/api/tw-rebuild", async (req, res) => {
     if (r && r.ok && r.data && r.data.length) {
       buildTwAnalysis(r.data, r.date).catch(e => console.error("tw analysis bg:", e.message));
     }
-    res.json({ ok: r.ok, date: r.date, count: r.count, note: r.ok ? "台股Top50已更新，AI題材分析背景生成中" : r.error });
+    res.json({ ok: r.ok, date: r.date, count: r.count, otcCount: r.otcCount, source: r.source, note: r.ok ? `台股Top50已更新（來源 ${r.source}，榜內上櫃 ${r.otcCount} 檔），AI題材分析背景生成中` : r.error });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -959,21 +1110,21 @@ cron.schedule("*/5 * * * *", async () => {
   await updateTwNews();   // 台股新聞（鉅亨）：搬自 Worker，每5分鐘抓→有新才寫 KV
 });
 
-// 台股 Top50 cron：台股下午1:30收盤，但 STOCK_DAY_ALL 全市場彙總約下午5點才更新完整
-// 17:00(UTC 09:00)抓當天完整收盤 + 18:00(UTC 10:00)補跑一次（雙保險）
-cron.schedule("0 9 * * *", async () => {   // 台北 17:00 (UTC 09:00)
+// 台股 Top50 cron：FinMind 每交易日約 17:30 更新完整日資料
+// 17:45(UTC 09:45)主跑 + 18:30(UTC 10:30)補跑一次（雙保險；Worker 18:00 起會來拿 tw_daily_all 建池）
+cron.schedule("45 9 * * *", async () => {   // 台北 17:45 (UTC 09:45)
   try {
     const r = await buildTwTop50();
     if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
-    console.log(`台股 cron(17:00) date=${r && r.date}`);
-  } catch (e) { console.error("台股 cron(17:00) error:", e.message); }
+    console.log(`台股 cron(17:45) date=${r && r.date} source=${r && r.source}`);
+  } catch (e) { console.error("台股 cron(17:45) error:", e.message); }
 });
-cron.schedule("0 10 * * *", async () => {   // 台北 18:00 補跑
+cron.schedule("30 10 * * *", async () => {   // 台北 18:30 補跑
   try {
     const r = await buildTwTop50();
     if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
-    console.log(`台股 cron(18:00補) date=${r && r.date}`);
-  } catch (e) { console.error("台股 cron(18:00補) error:", e.message); }
+    console.log(`台股 cron(18:30補) date=${r && r.date} source=${r && r.source}`);
+  } catch (e) { console.error("台股 cron(18:30補) error:", e.message); }
 });
 
 // 健康檢查（UptimeRobot ping 用）
@@ -1082,6 +1233,19 @@ app.get("/api/article", async (req, res) => {
 });
 
 // 上櫃每日收盤行情代打：Worker 的 buildDailyData 會打這支拿 OTC 資料
+// 全市場日資料（上市+上櫃合併，FinMind 主力/官方備援）：Worker 盤後建池用
+app.get("/api/tw-daily-all", async (req, res) => {
+  try {
+    const d = await kvGet("tw_daily_all");
+    if (!d || !Array.isArray(d.data) || !d.data.length) {
+      return res.status(404).json({ ok: false, error: "尚無全市場日資料（17:45 後由 cron 產生，或先打 /api/tw-rebuild）" });
+    }
+    res.json(d);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/api/otc-daily", async (req, res) => {
   try {
     const result = await fetchOtcDaily();
@@ -1236,34 +1400,8 @@ async function buildUsTop50() {
     rows.sort((a, b) => b.dollarVol - a.dollarVol);
     let top50 = rows.slice(0, 50).map((s, i) => ({ rank: i + 1, ...s }));
 
-    // ── 在榜天數 + 排名變化 + NEW ──
-    // 新進榜判定：用「上一個交易日的 top50 快照」比對——今天有、昨天快照沒有的 = 新進榜
-    // 快照只在「日期變了」才更新（避免同一天 rebuild 多次自己跟自己比，導致新進榜永遠空）
-    const snap = (await kvGet("us_prev_top50")) || { date: "", codes: [] };
-    const prevCodes = new Set(snap.codes || []);
-    const isFirstRun = !snap.date;                  // 從沒有快照（第一次跑）
-    const hist = (await kvGet("us_history")) || {};
-    const newHist = {};
-    top50 = top50.map(s => {
-      const h = hist[s.code];
-      // 新進榜：昨天快照沒有這檔（且非第一次跑，第一次無對照基準不標NEW）
-      const isNew = !isFirstRun && !prevCodes.has(s.code);
-      // 換日才進位：同一天重複 build 不再累加 days、也不把 rankChange 洗成0
-      const isNewDay = !h || h.lastDate !== date;
-      const days = h ? (isNewDay ? (h.days || 1) + 1 : (h.days || 1)) : 1;
-      // 排名變化 = 昨天名次 − 今天名次；換日時「昨天名次」=h.lastRank，同日重算用已存的 prevRank
-      const prevRank = h ? (isNewDay ? (h.lastRank ?? null) : (h.prevRank ?? null)) : null;
-      const rankChange = prevRank ? (prevRank - s.rank) : 0;
-      newHist[s.code] = { days, lastRank: s.rank, prevRank, lastDate: date, firstDate: h?.firstDate || date };
-      return { ...s, days, isNew, rankChange };
-    });
-    await kvPut("us_history", newHist, 86400 * 30);
-
-    // 更新「昨天快照」：只有當 KV 裡的快照日期 ≠ 今天，才把今天存成新快照
-    // （這樣同一天 rebuild 多次，快照維持「上一個交易日」，新進榜判定才穩定）
-    if (snap.date !== date) {
-      await kvPut("us_prev_top50", { date, codes: top50.map(s => s.code) }, 86400 * 7);
-    }
+    // ── NEW / ▲▼ / 在榜天數：一律跟「昨天定榜」比（同日重建不洗 NEW、不動天數；美股無缺角問題）──
+    top50 = await applyBoardHistory("us_board_history", date, top50, null);
 
     const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50 };
     await kvPut("us_top50", result, 86400 * 3);
@@ -1299,15 +1437,20 @@ app.get("/api/us-rebuild", async (req, res) => {
   }
 });
 
-// 測試用：把「昨天快照」故意設成「今天榜去掉後10檔」，讓那10檔變新進榜（驗證新進榜功能）
+// 測試用：把「昨天定榜」故意移除今天榜的後10檔，讓那10檔變新進榜（驗證新進榜功能）
 app.get("/api/us-test-newcomers", async (req, res) => {
   try {
     const cur = await kvGet("us_top50");
     if (!cur || !cur.data) return res.json({ ok: false, error: "尚無 us_top50 資料，請先 us-rebuild" });
-    const codes = cur.data.map(s => s.code).slice(0, 40);   // 假裝昨天只有前40檔
-    // date 設成跟今天一樣，這樣 rebuild 時 snap.date===date 不會覆蓋掉這個測試快照
-    await kvPut("us_prev_top50", { date: cur.date, codes }, 86400 * 7);
-    res.json({ ok: true, note: "已設測試快照（昨天=前40檔）。現在打 /api/us-rebuild，第41-50名會變新進榜" });
+    const store = await kvGet("us_board_history");
+    if (!store || !Array.isArray(store.dates)) return res.json({ ok: false, error: "尚無 us_board_history" });
+    const prevDates = store.dates.filter(d => d < cur.date).sort().reverse();
+    if (!prevDates.length) return res.json({ ok: false, error: "還沒有『昨天定榜』可改（需先跨一天）" });
+    const b = store.boards[prevDates[0]];
+    const drop = cur.data.slice(40).map(s => s.code);   // 今天的第41-50名
+    for (const c of drop) delete b.list[c];
+    await kvPut("us_board_history", store, 86400 * 30);
+    res.json({ ok: true, note: `已從昨天定榜(${prevDates[0]})移除 ${drop.length} 檔。現在打 /api/us-rebuild，第41-50名會變新進榜` });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
