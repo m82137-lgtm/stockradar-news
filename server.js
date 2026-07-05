@@ -24,6 +24,7 @@ const KV_API = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/s
 // Telegram 推播設定（存 Render 環境變數；沒設則靜默不推，不影響新聞功能）
 const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
+const FINMIND_TOKEN = process.env.FINMIND_TOKEN || "";   // 籌碼三指標用；沒填也能跑（300次/hr）
 
 const HOT_SECTOR_KEEP_DAYS = 30;
 
@@ -777,6 +778,109 @@ async function applyBoardHistory(kvKey, date, top50, otcTester) {
   return out;
 }
 
+// ── FinMind 極簡客戶端（僅籌碼指標用；上限 600次/hr，本站一天 3~4 發）──
+async function finmindGet(dataset, params = {}) {
+  const qs = new URLSearchParams({ dataset, ...params });
+  const url = `https://api.finmindtrade.com/api/v4/data?${qs.toString()}`;
+  const headers = { "User-Agent": BROWSER_UA, "Accept": "application/json" };
+  if (FINMIND_TOKEN) headers["Authorization"] = `Bearer ${FINMIND_TOKEN}`;
+  try {
+    const r = await fetch(url, { headers });
+    const text = await r.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    if (!json || json.status !== 200 || !Array.isArray(json.data)) {
+      return { ok: false, status: r.status, msg: json && json.msg, head: text.slice(0, 150), data: [] };
+    }
+    return { ok: true, status: r.status, data: json.data };
+  } catch (e) { return { ok: false, status: 0, msg: e.message, data: [] }; }
+}
+
+// ── 籌碼三指標（風度頁）：外資台指淨OI / 散戶微台淨OI / 融資餘額 ──
+// 每交易日約 22:10 由 cron 產生（融資約 21:00 後才公布）；🔄 一鍵重建也會順手更新。
+// 散戶淨OI 數學恆等式：全市場多單=空單 → 散戶淨 = −(三大法人淨合計)，不需另抓總OI。
+async function buildChipIndicators() {
+  try {
+    const end = twTradingDate(0);
+    const start = shiftDateStr(end, -70);   // 70 日曆天 ≈ 45+ 交易日，取尾 30
+    const [fut, tmf0, mar] = await Promise.all([
+      finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
+      finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
+      finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
+    ]);
+    // 微台沒資料就自動退小台（標籤跟著換）
+    let tmf = tmf0, retailLabel = "微台";
+    if (!tmf.ok || tmf.data.length < 5) {
+      const mtx = await finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "MTX", start_date: start, end_date: end });
+      if (mtx.ok && mtx.data.length >= 5) { tmf = mtx; retailLabel = "小台"; console.log("籌碼：微台(TMF)無資料，自動改用小台(MTX)"); }
+    }
+    const bad = [];
+    if (!fut.ok) bad.push(`台指法人(status=${fut.status} msg=${(fut.msg||"-").slice(0,80)})`);
+    if (!tmf.ok) bad.push(`微台/小台法人(status=${tmf.status} msg=${(tmf.msg||"-").slice(0,80)})`);
+    if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
+    if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
+
+    const dlabel = (d) => d.slice(5).replace("-", "/");
+    // ① 外資台指淨OI（餘額）
+    const fmap = {};
+    for (const r of fut.data) {
+      if (!String(r.institutional_investors || "").includes("外資")) continue;
+      fmap[r.date] = (+r.long_open_interest_balance_volume || 0) - (+r.short_open_interest_balance_volume || 0);
+    }
+    // ② 散戶淨OI = −(法人淨合計)
+    const rmap = {};
+    for (const r of tmf.data) {
+      const net = (+r.long_open_interest_balance_volume || 0) - (+r.short_open_interest_balance_volume || 0);
+      rmap[r.date] = (rmap[r.date] || 0) + net;
+    }
+    for (const d in rmap) rmap[d] = -rmap[d];
+    // ③ 整體融資（仟元 → 億）：name 匹配失敗時把清單留在 log 當遺言
+    const mmap = {}; const names = new Set();
+    for (const r of mar.data) {
+      const nm = String(r.name || ""); names.add(nm);
+      if (!(nm.includes("MarginPurchaseMoney") || nm.includes("融資金額"))) continue;
+      const bal = (+r.TodayBalance || 0) / 1e5;
+      mmap[r.date] = { bal, chg: ((+r.TodayBalance || 0) - (+r.YesBalance || 0)) / 1e5 };
+    }
+    if (!Object.keys(mmap).length && mar.data.length) console.log(`⚠️ 融資表 name 無匹配，清單：${[...names].join(",").slice(0, 200)}`);
+
+    const tail30 = (map) => Object.keys(map).sort().slice(-30);
+    const fD = tail30(fmap), rD = tail30(rmap), mD = tail30(mmap);
+    const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
+    const pack = {
+      ok: !!(fD.length || rD.length || mD.length),
+      updatedAt: Date.now(),
+      foreign: fD.length ? {
+        series: mkSeries(fD, fmap, v => Math.round(v)),
+        latest: Math.round(fmap[fD[fD.length - 1]]),
+        chg: fD.length > 1 ? Math.round(fmap[fD[fD.length - 1]] - fmap[fD[fD.length - 2]]) : 0,
+      } : null,
+      retail: rD.length ? {
+        label: retailLabel,
+        series: mkSeries(rD, rmap, v => Math.round(v)),
+        latest: Math.round(rmap[rD[rD.length - 1]]),
+        chg: rD.length > 1 ? Math.round(rmap[rD[rD.length - 1]] - rmap[rD[rD.length - 2]]) : 0,
+      } : null,
+      margin: mD.length ? {
+        series: mkSeries(mD, mmap, o => +o.chg.toFixed(1)),
+        bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
+        chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
+      } : null,
+    };
+    if (pack.ok) {
+      await kvPut("chip_indicators", pack, 86400 * 7);
+      console.log(`籌碼三指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天` +
+        (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : ""));
+    } else {
+      console.log("⚠️ 籌碼三指標全空，未寫入 KV");
+    }
+    return pack;
+  } catch (e) {
+    console.error("buildChipIndicators error:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 async function buildTwTop50() {
   try {
     // ── 抓上市 + 上櫃（都在 Render）──
@@ -876,6 +980,7 @@ app.get("/api/tw-rebuild", async (req, res) => {
     if (r && r.ok && r.data && r.data.length) {
       buildTwAnalysis(r.data, r.date).catch(e => console.error("tw analysis bg:", e.message));
     }
+    buildChipIndicators().catch(e => console.error("chip bg:", e.message));   // 籌碼三指標順手更新
     res.json({ ok: r.ok, date: r.date, count: r.count, otcCount: r.otcCount, note: r.ok ? `台股Top50已更新（榜內上櫃 ${r.otcCount} 檔），120檔掃描池與盤後追蹤已同步重建，AI題材分析背景生成中` : r.error });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -928,7 +1033,7 @@ ${top10txt}
 
 請輸出一個 JSON 物件，格式如下：
 {
-  "summary": "一段像財經晨報的盤後總評(約200-240字，通順一整段、不是條列)，照以下順序寫：(1)開場先點今天台股被什麼外部力量帶動(如美股費半/那指隔夜表現；若無明顯外部驅動就直接講台股)，再接加權指數盤中走勢(開高走高/開低震盪)、盤中高低、最終收漲跌點數、站上或跌破哪個關卡、成交金額；(2)點出資金主軸並把受惠族群一次列完；(3)點名1-2檔領漲龍頭，用『龍頭=領頭羊、帶動整個族群』的因果寫法(龍頭股+催化利多+它帶動哪個族群漲停或走強)；(4)收尾用一句反差或散戶觀察(哪個族群拉回、但哪些個股或族群仍受關注/成交量前幾名)，並可順帶外資/投信買賣超",
+  "summary": "一段像財經晨報的盤後總評(約150-200字，上限200、寧短勿長，通順一整段、不是條列)，照以下順序寫：(1)開場先點今天台股被什麼外部力量帶動(如美股費半/那指隔夜表現；若無明顯外部驅動就直接講台股)，再接加權指數盤中走勢(開高走高/開低震盪)、盤中高低、最終收漲跌點數、站上或跌破哪個關卡、成交金額；(2)點出資金主軸並把受惠族群一次列完；(3)點名1-2檔領漲龍頭，用『龍頭=領頭羊、帶動整個族群』的因果寫法(龍頭股+催化利多+它帶動哪個族群漲停或走強)；(4)收尾用一句反差或散戶觀察(哪個族群拉回、但哪些個股或族群仍受關注/成交量前幾名)，並可順帶外資/投信買賣超",
   "happened": [
     {"title": "已發生事件標題(20字內，寫成一句可讀的結論：主角+動作+受惠，如『國巨調漲電容，帶動被動元件族群』)", "desc": "事件說明(30-40字，一句講完誰因為什麼帶動誰，可帶數字與對象)", "date": "事件日期如6/28或今天"}
   ],
@@ -937,7 +1042,7 @@ ${top10txt}
   ]
 }
 寫作要求（很重要，這決定內容品質）：
-1. summary 約 200-240 字，就照上面 (1)~(4) 的骨架寫，像下面這種寫法與長度（這是「風格範例」，只示範結構與語氣，實際內容一定要用今天 Google 查到的真實資料，不要照抄範例裡的數字和個股）：「本日台股在美股費半指數強勁上漲帶動下，加權指數開高走高，盤中一度大漲逾千點，最終收漲893點，站上47000點大關，成交金額突破1.3兆元，顯示市場資金充沛。資金主要集中在AI相關供應鏈，特別是受惠AI伺服器、高速運算需求帶動的被動元件、晶圓代工、ABF載板、IC設計及封測等族群。國巨因調漲全系列電容且首次納入直接客戶，成為被動元件族群領頭羊，帶動多檔個股漲停。此外聯發科受惠外資調高目標價至萬元、AI ASIC業務強勁，也帶動IC設計族群走強。雖然記憶體族群今日普遍拉回，但面板雙虎友達、群創仍位居成交量前兩名，顯示散戶關注度仍高。」
+1. summary 約 150-200 字（上限 200、寧短勿長），就照上面 (1)~(4) 的骨架寫，像下面這種寫法與長度（這是「風格範例」，只示範結構與語氣，實際內容一定要用今天 Google 查到的真實資料，不要照抄範例裡的數字和個股）：「本日台股在美股費半強漲帶動下，加權指數開高走高，終場大漲893點站上47000點大關，成交金額1.3兆元。資金集中在AI供應鏈，被動元件、ABF載板、IC設計與封測全面走強。國巨因調漲全系列電容成為被動元件領頭羊，帶動多檔個股漲停；聯發科獲外資調高目標價至萬元，激勵IC設計族群。記憶體族群雖拉回，但面板雙虎仍居成交量前兩名，外資由連賣轉為買超。」
 2. happened 列「5 則」最近已經發生的台股重大事件，必須用 Google 搜尋查到真實近期新聞。只選「能解釋某族群為什麼發動的利多題材」，排除薪資／年薪統計、庫藏股買回進度、違約交割、董監改選、股東會、例行公告這類行政面或純風險新聞（除非該事件本身就是當天盤面主軸）。每則都要「龍頭股→帶動族群」連動：點名主角股 + 它帶起的族群 + 催化利多（漲價幅度、分析師調目標價、接大單、打入某大廠供應鏈、受惠某題材、供不應求／急單／產能滿載／旺季拉貨、財報數字、法說會結論等）。desc 壓到 30-40 字，一句講完「誰、因為什麼、帶動誰」，可同時點名對象並帶一個關鍵數字。範例（示範長度與寫法）：「國巨宣布調漲全系列電容價格一到兩成，受惠AI伺服器需求供不應求，帶動被動元件族群多檔漲停」「聯發科獲瑞銀與高盛同步上調目標價至萬元，看好雲端ASIC放量，激勵IC設計族群走強」。不要寫「電子股上漲」這種空泛句，也不要塞滿細節。
 3. upcoming 列「5 則」接下來幾天即將發生的具體事件（即將召開的法說會、即將公布的月營收、即將出爐的經濟數據、除權息、產業會議、政策議程等），每則 desc 壓到 30-40 字，一句講清楚「是什麼事＋預期影響哪個族群」，可帶數字與對象。範例：「台積電7/16召開第二季法說會，市場關注CoWoS產能供需、AI需求動能與下半年毛利率展望」。
 4. 優先寫有明確主角、能解釋漲跌的事件。查不到的不要硬湊空泛句，但盡量湊滿5則。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
@@ -1028,6 +1133,15 @@ ${ncList}`;
   }
 }
 
+// 籌碼三指標（風度頁三卡用；前端實際經 Worker 讀，這條當備援/驗收）
+app.get("/api/chip-indicators", async (req, res) => {
+  try {
+    const d = await kvGet("chip_indicators");
+    if (!d) return res.status(404).json({ ok: false, error: "尚無籌碼資料（每晚 22:10 cron 產生，或先打 /api/tw-rebuild）" });
+    res.json(d);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get("/api/tw-analysis", async (req, res) => {
   try {
     const cached = await kvGet("tw_analysis");
@@ -1081,6 +1195,14 @@ cron.schedule("0 9 * * *", async () => {   // 台北 17:00 (UTC 09:00)
     console.log(`台股 cron(17:00) date=${r && r.date}`);
   } catch (e) { console.error("台股 cron(17:00) error:", e.message); }
 });
+// 籌碼三指標：融資資料約 21:00 後公布，排 22:10 一次抓齊
+cron.schedule("10 14 * * *", async () => {   // 台北 22:10 (UTC 14:10)
+  try {
+    const p = await buildChipIndicators();
+    console.log(`籌碼 cron(22:10) ok=${p && p.ok}`);
+  } catch (e) { console.error("籌碼 cron error:", e.message); }
+});
+
 cron.schedule("0 10 * * *", async () => {   // 台北 18:00 補跑
   try {
     const r = await buildTwTop50();
@@ -1488,7 +1610,7 @@ ${top10txt}
 
 請輸出一個 JSON 物件，格式如下：
 {
-  "summary": "一段像財經晨報的盤後總評(約200-240字，通順一整段、不是條列)，照以下順序寫：(1)開場帶到三大指數(道瓊/標普/那斯達克)與費半當天漲跌，接著點出今天成交/資金主軸集中在哪個族群、受惠什麼題材；(2)點名3-5檔今天領漲吸金的龍頭個股(一定帶英文代號，如 NVDA、MU、AVGO)，並寫出它們為什麼吸金(財報數字、分析師上調目標價、AI晶片需求、在AI基礎設施的戰略地位、接單、指數調整等)；(3)收尾講市場在交易什麼長期故事(如AI長期增長)，並帶一個 nuance(有什麼疑慮、但為什麼信心仍在，如對『賣鏟人』信心強)",
+  "summary": "一段像財經晨報的盤後總評(約150-200字，上限200、寧短勿長，通順一整段、不是條列)，照以下順序寫：(1)開場帶到三大指數(道瓊/標普/那斯達克)與費半當天漲跌，接著點出今天成交/資金主軸集中在哪個族群、受惠什麼題材；(2)點名3-5檔今天領漲吸金的龍頭個股(一定帶英文代號，如 NVDA、MU、AVGO)，並寫出它們為什麼吸金(財報數字、分析師上調目標價、AI晶片需求、在AI基礎設施的戰略地位、接單、指數調整等)；(3)收尾講市場在交易什麼長期故事(如AI長期增長)，並帶一個 nuance(有什麼疑慮、但為什麼信心仍在，如對『賣鏟人』信心強)",
   "happened": [
     {"title": "已發生事件標題(20字內，寫成一句可讀的結論：主角+動作+受惠，如『AMD獲多家調升目標價，伺服器CPU受惠』)", "desc": "事件說明(30-40字，一句講完誰因為什麼帶動誰，可帶數字與對象)", "date": "事件日期如6/25或今天"}
   ],
@@ -1497,7 +1619,7 @@ ${top10txt}
   ]
 }
 寫作要求（很重要，這決定內容品質）：
-1. summary 約 200-240 字，就照上面 (1)~(3) 的骨架寫，像下面這種寫法與長度（這是「風格範例」，只示範結構與語氣，實際內容一定要用今天 Google 查到的真實資料，不要照抄範例裡的個股和數字）：「本日美股在三大指數與費半上漲帶動下，成交重點集中在半導體與相關設備族群，特別是受惠AI需求爆發的記憶體與高效能運算晶片。Micron(MU)、Nvidia(NVDA)、Sandisk(SNDK)、AMD(AMD)、Marvell(MRVL)、Broadcom(AVGO)等個股因分析師上調目標價、AI晶片需求強勁及在AI基礎設施的戰略地位而吸引大量資金。市場主要在交易AI產業的長期增長故事，儘管部分科技巨頭面臨AI投資支出與變現的疑慮，但對『賣鏟人』的信心依然強勁。」
+1. summary 約 150-200 字（上限 200、寧短勿長），就照上面 (1)~(3) 的骨架寫，像下面這種寫法與長度（這是「風格範例」，只示範結構與語氣，實際內容一定要用今天 Google 查到的真實資料，不要照抄範例裡的個股和數字）：「本日美股三大指數與費半齊揚，資金集中在AI相關的記憶體與高效能運算晶片。Micron(MU)因財報優於預期大漲，Nvidia(NVDA)、Broadcom(AVGO)受惠AI晶片需求與分析師上調目標價同步吸金。市場持續交易AI長期增長的故事，儘管部分巨頭面臨投資變現疑慮，對『賣鏟人』的信心依然強勁。」
 2. happened 列「5 則」最近已經發生的美股重大事件，必須用 Google 搜尋查到真實近期新聞。只選「能解釋某族群或某龍頭為什麼發動的利多題材」，排除股票分割、股息、例行公告這類無關或行政新聞（除非本身就是當天盤面主軸）。每則都要點名主角公司（帶英文代號）+ 它帶起的族群或題材 + 催化利多（財報數字、併購金額、分析師調目標價、接大單、打入某大廠供應鏈、供不應求／訂單能見度高／產能滿載、納入指數、產品發表等）。desc 壓到 30-40 字，一句講完「誰、因為什麼、帶動誰」，可同時點名對象並帶一個關鍵數字。範例（示範長度與寫法）：「Nvidia財報資料中心營收創新高並大幅上調下季財測，AI晶片需求強勁帶動半導體族群齊漲」「AMD獲多家分析師同步上調目標價，看好伺服器CPU市佔提升與AI加速器出貨動能」。不要寫「科技股上漲」這種空泛句，也不要塞滿細節。
 3. upcoming 列「5 則」接下來幾天即將發生的具體事件（即將公布的某公司財報、即將召開的會議名稱、即將出爐的經濟數據名稱與日期、Fed 會議等），每則 desc 壓到 30-40 字，一句講清楚「是什麼事＋預期影響哪個族群」，可帶數字與對象。範例：「6月非農就業數據週五出爐，市場關注數據強弱對Fed降息路徑與科技股資金流向的影響」。
 4. 優先寫有明確主角、能解釋漲跌的事件。查不到的不要硬湊空泛句，但盡量湊滿5則。全部繁體中文。只輸出 JSON 物件，不要其他文字、不要 markdown 框。`;
