@@ -816,12 +816,14 @@ async function finmindGet(dataset, params = {}) {
 async function buildChipIndicators() {
   try {
     const end = twTradingDate(0);
-    const start = shiftDateStr(end, -70);   // 70 日曆天 ≈ 45+ 交易日，取尾 30
-    const [fut, tmf0, mar, mmr] = await Promise.all([
+    const start = shiftDateStr(end, -100);   // 100 日曆天 ≈ 65+ 交易日，取尾 60
+    const startK = shiftDateStr(end, -185);  // K線要 60 根＋前置 59 根算 60MA
+    const [fut, tmf0, mar, mmr, kraw] = await Promise.all([
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
       finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
       finmindGet("TaiwanTotalExchangeMarginMaintenance", { start_date: start, end_date: end }),
+      finmindGet("TaiwanStockPrice", { data_id: "TAIEX", start_date: startK, end_date: end }),
     ]);
     // 微台沒資料就自動退小台（標籤跟著換）
     let tmf = tmf0, retailLabel = "微台";
@@ -834,6 +836,7 @@ async function buildChipIndicators() {
     if (!tmf.ok) bad.push(`微台/小台法人(status=${tmf.status} msg=${(tmf.msg||"-").slice(0,80)})`);
     if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
     if (!mmr.ok) bad.push(`大盤維持率(status=${mmr.status} msg=${(mmr.msg||"-").slice(0,80)})`);
+    if (!kraw.ok) bad.push(`加權指數K線(status=${kraw.status} msg=${(kraw.msg||"-").slice(0,80)})`);
     if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
 
     const dlabel = (d) => d.slice(5).replace("-", "/");
@@ -881,12 +884,39 @@ async function buildChipIndicators() {
       }
     }
 
-    const tail30 = (map) => Object.keys(map).sort().slice(-30);
-    const fD = tail30(fmap), rD = tail30(rmap), mD = tail30(mmap);
+    // ⑤ 加權指數日K（60 根＋5/10/20/60MA，MA 用完整回溯窗計算後取尾）
+    let kline = null;
+    if (kraw.ok && kraw.data.length >= 20) {
+      const rows = kraw.data
+        .filter(r => +r.close > 0)
+        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      const closes = rows.map(r => +r.close);
+      const maAt = (i, n) => {
+        if (i + 1 < n) return null;
+        let s = 0;
+        for (let j = i - n + 1; j <= i; j++) s += closes[j];
+        return +(s / n).toFixed(2);
+      };
+      const full = rows.map((r, i) => ({
+        d: dlabel(r.date),
+        o: +(+r.open).toFixed(2), h: +(+r.max).toFixed(2), l: +(+r.min).toFixed(2), c: +(+r.close).toFixed(2),
+        chg: i > 0 ? +((+r.close) - closes[i - 1]).toFixed(2) : 0,
+        pct: i > 0 && closes[i - 1] > 0 ? +(((+r.close) - closes[i - 1]) / closes[i - 1] * 100).toFixed(2) : 0,
+        ma5: maAt(i, 5), ma10: maAt(i, 10), ma20: maAt(i, 20), ma60: maAt(i, 60),
+      }));
+      const series = full.slice(-60);
+      if (series.length >= 20) kline = { series };
+    } else if (kraw.ok) {
+      console.log(`⚠️ 加權指數K線資料過少（${kraw.data.length} 筆），跳過`);
+    }
+
+    const tailN = (map, n) => Object.keys(map).sort().slice(-n);
+    const fD = tailN(fmap, 60), rD = tailN(rmap, 60), mD = tailN(mmap, 60);
     const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
     const pack = {
-      ok: !!(fD.length || rD.length || mD.length),
+      ok: !!(fD.length || rD.length || mD.length || kline),
       updatedAt: Date.now(),
+      kline,
       foreign: fD.length ? {
         series: mkSeries(fD, fmap, v => Math.round(v)),
         latest: Math.round(fmap[fD[fD.length - 1]]),
@@ -904,14 +934,14 @@ async function buildChipIndicators() {
         bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
         chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
         mm: (() => {
-          const dts = tail30(ratioMap);
+          const dts = tailN(ratioMap, 60);
           return dts.length ? mkSeries(dts, ratioMap, v => +(+v).toFixed(1)) : null;
         })(),
       } : null,
     };
     if (pack.ok) {
       await kvPut("chip_indicators", pack, 86400 * 7);
-      console.log(`籌碼三指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天` +
+      console.log(`籌碼三指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天 / K線${kline ? kline.series.length : 0}根` +
         (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : "") +
         (pack.margin && pack.margin.mm ? `｜維持率=${pack.margin.mm[pack.margin.mm.length - 1].v}%` : "｜維持率:無"));
     } else {
@@ -1238,6 +1268,14 @@ cron.schedule("0 9 * * *", async () => {   // 台北 17:00 (UTC 09:00)
     console.log(`台股 cron(17:00) date=${r && r.date}`);
   } catch (e) { console.error("台股 cron(17:00) error:", e.message); }
 });
+// 籌碼 17:45 班：FinMind 股價/期貨 17:30 更新完 → 當天傍晚就有新 K 棒與外資期貨（融資與維持率此時仍為前日值）
+cron.schedule("45 9 * * *", async () => {   // 台北 17:45 (UTC 09:45)
+  try {
+    const p = await buildChipIndicators();
+    console.log(`籌碼 cron(17:45) ok=${p && p.ok}`);
+  } catch (e) { console.error("籌碼 cron(17:45) error:", e.message); }
+});
+
 // 籌碼三指標：融資資料約 21:00 後公布，排 22:10 一次抓齊
 cron.schedule("10 14 * * *", async () => {   // 台北 22:10 (UTC 14:10)
   try {
