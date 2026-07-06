@@ -817,10 +817,11 @@ async function buildChipIndicators() {
   try {
     const end = twTradingDate(0);
     const start = shiftDateStr(end, -70);   // 70 日曆天 ≈ 45+ 交易日，取尾 30
-    const [fut, tmf0, mar] = await Promise.all([
+    const [fut, tmf0, mar, mmr] = await Promise.all([
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
       finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
+      finmindGet("TaiwanTotalExchangeMarginMaintenance", { start_date: start, end_date: end }),
     ]);
     // 微台沒資料就自動退小台（標籤跟著換）
     let tmf = tmf0, retailLabel = "微台";
@@ -832,6 +833,7 @@ async function buildChipIndicators() {
     if (!fut.ok) bad.push(`台指法人(status=${fut.status} msg=${(fut.msg||"-").slice(0,80)})`);
     if (!tmf.ok) bad.push(`微台/小台法人(status=${tmf.status} msg=${(tmf.msg||"-").slice(0,80)})`);
     if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
+    if (!mmr.ok) bad.push(`大盤維持率(status=${mmr.status} msg=${(mmr.msg||"-").slice(0,80)})`);
     if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
 
     const dlabel = (d) => d.slice(5).replace("-", "/");
@@ -859,6 +861,26 @@ async function buildChipIndicators() {
     }
     if (!Object.keys(mmap).length && mar.data.length) console.log(`⚠️ 融資表 name 無匹配，清單：${[...names].join(",").slice(0, 200)}`);
 
+    // ④ 大盤融資維持率（TaiwanTotalExchangeMarginMaintenance）：欄位名防禦式解析
+    //    不確定 FinMind 欄位命名 → 逐列找第一個 50~400 之間的數值欄（維持率%量級），首次命中 log 欄位名
+    const ratioMap = {};
+    let ratioField = "";
+    if (mmr.ok) {
+      for (const r of mmr.data) {
+        if (!ratioField) {
+          for (const k in r) {
+            if (k === "date") continue;
+            const x = +r[k];
+            if (isFinite(x) && x > 50 && x < 400) { ratioField = k; break; }
+          }
+          if (ratioField) console.log(`維持率欄位確認=${ratioField}`);
+          else { console.log(`⚠️ 維持率欄位無法辨識，樣本鍵：${Object.keys(r).join(",").slice(0, 150)}`); break; }
+        }
+        const x = +r[ratioField];
+        if (isFinite(x) && x > 50 && x < 400) ratioMap[r.date] = x;
+      }
+    }
+
     const tail30 = (map) => Object.keys(map).sort().slice(-30);
     const fD = tail30(fmap), rD = tail30(rmap), mD = tail30(mmap);
     const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
@@ -878,14 +900,20 @@ async function buildChipIndicators() {
       } : null,
       margin: mD.length ? {
         series: mkSeries(mD, mmap, o => +o.chg.toFixed(1)),
+        balSeries: mkSeries(mD, mmap, o => +o.bal.toFixed(1)),
         bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
         chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
+        mm: (() => {
+          const dts = tail30(ratioMap);
+          return dts.length ? mkSeries(dts, ratioMap, v => +(+v).toFixed(1)) : null;
+        })(),
       } : null,
     };
     if (pack.ok) {
       await kvPut("chip_indicators", pack, 86400 * 7);
       console.log(`籌碼三指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天` +
-        (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : ""));
+        (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : "") +
+        (pack.margin && pack.margin.mm ? `｜維持率=${pack.margin.mm[pack.margin.mm.length - 1].v}%` : "｜維持率:無"));
     } else {
       console.log("⚠️ 籌碼三指標全空，未寫入 KV");
     }
