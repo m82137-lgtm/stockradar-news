@@ -584,21 +584,35 @@ async function updateTwNews() {
 // 回傳正規化後的清單：code / name / close / chgPct / vol(張) / tradeValue(元)
 async function fetchOtcDaily() {
   const TPEX = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes";
-  const r = await fetch(TPEX, {
-    headers: {
-      "User-Agent": BROWSER_UA,
-      "Accept": "application/json, text/plain, */*",
-      "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-      "Referer": "https://www.tpex.org.tw/zh-tw/index.html",
-    },
-  });
-  const status = r.status;
-  const text = await r.text();
+  // tpex 對雲端 IP 偶爾中途掐線（error: terminated），實測「再打一次就好」→ 自動重試 3 次、每次隔 20 秒
+  let last = { ok: false, status: 0, head: "", data: [] };
   let json = null;
-  try { json = JSON.parse(text); } catch {}
-  if (!Array.isArray(json)) {
-    return { ok: false, status, head: text.slice(0, 200), data: [] };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await fetch(TPEX, {
+        headers: {
+          "User-Agent": BROWSER_UA,
+          "Accept": "application/json, text/plain, */*",
+          "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+          "Referer": "https://www.tpex.org.tw/zh-tw/index.html",
+        },
+      });
+      const status = r.status;
+      const text = await r.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch {}
+      if (Array.isArray(parsed) && parsed.length) { json = parsed; last.status = status; break; }
+      last = { ok: false, status, head: text.slice(0, 200), data: [] };
+    } catch (e) {
+      last = { ok: false, status: 0, head: `第${attempt}次: ${e.message}`, data: [] };
+    }
+    if (attempt < 3) {
+      console.log(`櫃買第 ${attempt} 次抓取失敗（${last.head || "status=" + last.status}），20 秒後重試…`);
+      await new Promise(res => setTimeout(res, 20000));
+    }
   }
+  if (!json) return last;
+  const status = last.status;
   const num = (s) => {
     const n = parseFloat(String(s == null ? "" : s).replace(/,/g, "").trim());
     return isNaN(n) ? 0 : n;
@@ -834,13 +848,14 @@ async function buildChipIndicators() {
       rmap[r.date] = (rmap[r.date] || 0) + net;
     }
     for (const d in rmap) rmap[d] = -rmap[d];
-    // ③ 整體融資（仟元 → 億）：name 匹配失敗時把清單留在 log 當遺言
+    // ③ 整體融資（元 → 億）：name 匹配失敗時把清單留在 log 當遺言
     const mmap = {}; const names = new Set();
     for (const r of mar.data) {
       const nm = String(r.name || ""); names.add(nm);
       if (!(nm.includes("MarginPurchaseMoney") || nm.includes("融資金額"))) continue;
-      const bal = (+r.TodayBalance || 0) / 1e5;
-      mmap[r.date] = { bal, chg: ((+r.TodayBalance || 0) - (+r.YesBalance || 0)) / 1e5 };
+      // 實測 log：TodayBalance 單位是「元」（07-06 印出 6308124.8億=除錯），元→億 除 1e8
+      const bal = (+r.TodayBalance || 0) / 1e8;
+      mmap[r.date] = { bal, chg: ((+r.TodayBalance || 0) - (+r.YesBalance || 0)) / 1e8 };
     }
     if (!Object.keys(mmap).length && mar.data.length) console.log(`⚠️ 融資表 name 無匹配，清單：${[...names].join(",").slice(0, 200)}`);
 
