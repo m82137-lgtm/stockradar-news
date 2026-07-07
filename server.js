@@ -934,13 +934,13 @@ async function buildChipIndicators() {
           w,
         };
       });
-      const series = full.slice(-60);
+      const series = full.slice(-45);   // 六卡統一 45 交易日
       return series.length >= 20 ? { series } : null;
     };
     const idx = { tse: buildIdx(kraw, "加權"), otc: buildIdx(otcIdx, "櫃買") };
 
     const tailN = (map, n) => Object.keys(map).sort().slice(-n);
-    const fD = tailN(fmap, 60), rD = tailN(rmap, 60), mD = tailN(mmap, 60);
+    const fD = tailN(fmap, 45), rD = tailN(rmap, 45), mD = tailN(mmap, 45);
     const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
     const pack = {
       ok: !!(fD.length || rD.length || mD.length || idx.tse || idx.otc),
@@ -963,7 +963,7 @@ async function buildChipIndicators() {
         bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
         chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
         mm: (() => {
-          const dts = tailN(ratioMap, 60);
+          const dts = tailN(ratioMap, 45);
           return dts.length ? mkSeries(dts, ratioMap, v => +(+v).toFixed(1)) : null;
         })(),
       } : null,
