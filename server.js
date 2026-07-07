@@ -636,6 +636,7 @@ async function fetchOtcDaily() {
       chgPct,
       vol: Math.round(volume / 1000),
       tradeValue,
+      o: num(row.Open), h: num(row.High), l: num(row.Low),
     });
   }
   return { ok: true, status, date: json[0]?.Date || null, count: data.length, data };
@@ -681,6 +682,7 @@ async function fetchTseDaily() {
     data.push({
       code, name: String(row[1] || "").trim(), market: "TSE",
       close: price, chgPct, vol: Math.round(volume / 1000), tradeValue,
+      o: num(row[4]), h: num(row[5]), l: num(row[6]),
     });
   }
   return { ok: true, status, date: dateStr, count: data.length, data };
@@ -818,13 +820,20 @@ async function buildChipIndicators() {
     const end = twTradingDate(0);
     const start = shiftDateStr(end, -100);   // 100 日曆天 ≈ 65+ 交易日，取尾 60
     const startK = shiftDateStr(end, -185);  // K線要 60 根＋前置 59 根算 60MA
-    const [fut, tmf0, mar, mmr, kraw] = await Promise.all([
+    const [fut, tmf0, mar, mmr, kraw, kraw2] = await Promise.all([
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
       finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
       finmindGet("TaiwanTotalExchangeMarginMaintenance", { start_date: start, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TAIEX", start_date: startK, end_date: end }),
+      finmindGet("TaiwanStockPrice", { data_id: "TPEx", start_date: startK, end_date: end }),
     ]);
+    // 櫃買指數代號防禦：TPEx 沒資料就退 TPEX 再試一次
+    let otcIdx = kraw2;
+    if (!otcIdx.ok || otcIdx.data.length < 30) {
+      const alt = await finmindGet("TaiwanStockPrice", { data_id: "TPEX", start_date: startK, end_date: end });
+      if (alt.ok && alt.data.length >= 30) { otcIdx = alt; console.log("指數K：櫃買改用代號 TPEX"); }
+    }
     // 微台沒資料就自動退小台（標籤跟著換）
     let tmf = tmf0, retailLabel = "微台";
     if (!tmf.ok || tmf.data.length < 5) {
@@ -837,6 +846,7 @@ async function buildChipIndicators() {
     if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
     if (!mmr.ok) bad.push(`大盤維持率(status=${mmr.status} msg=${(mmr.msg||"-").slice(0,80)})`);
     if (!kraw.ok) bad.push(`加權指數K線(status=${kraw.status} msg=${(kraw.msg||"-").slice(0,80)})`);
+    if (!otcIdx.ok) bad.push(`櫃買指數K線(status=${otcIdx.status} msg=${(otcIdx.msg||"-").slice(0,80)})`);
     if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
 
     const dlabel = (d) => d.slice(5).replace("-", "/");
@@ -884,39 +894,58 @@ async function buildChipIndicators() {
       }
     }
 
-    // ⑤ 加權指數日K（60 根＋5/10/20/60MA，MA 用完整回溯窗計算後取尾）
-    let kline = null;
-    if (kraw.ok && kraw.data.length >= 20) {
-      const rows = kraw.data
-        .filter(r => +r.close > 0)
-        .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    // ⑤ 指數雙K（加權＋櫃買）：60 根 K 棒＋20MA＋均線彎向＋逐日風度
+    //    風度真值表（與 Worker computeWindGauge 完全一致）：
+    //    站上20MA×MACD柱(12/26/9)今>昨=強風；站上×柱走弱=亂流；線下×柱轉強=陣風；線下×柱走弱=無風
+    const emaSeries = (vals, n) => {
+      const k = 2 / (n + 1); let e = null;
+      return vals.map(v => (e = e == null ? v : v * k + e * (1 - k)));
+    };
+    const buildIdx = (raw, name) => {
+      if (!raw.ok || raw.data.length < 40) {
+        if (raw.ok) console.log(`⚠️ ${name}指數K資料過少（${raw.data.length} 筆），跳過`);
+        return null;
+      }
+      const rows = raw.data.filter(r => +r.close > 0)
+        .sort((x, y) => String(x.date).localeCompare(String(y.date)));
       const closes = rows.map(r => +r.close);
-      const maAt = (i, n) => {
-        if (i + 1 < n) return null;
+      const ma20 = closes.map((_, i) => {
+        if (i < 19) return null;
         let s = 0;
-        for (let j = i - n + 1; j <= i; j++) s += closes[j];
-        return +(s / n).toFixed(2);
-      };
-      const full = rows.map((r, i) => ({
-        d: dlabel(r.date),
-        o: +(+r.open).toFixed(2), h: +(+r.max).toFixed(2), l: +(+r.min).toFixed(2), c: +(+r.close).toFixed(2),
-        chg: i > 0 ? +((+r.close) - closes[i - 1]).toFixed(2) : 0,
-        pct: i > 0 && closes[i - 1] > 0 ? +(((+r.close) - closes[i - 1]) / closes[i - 1] * 100).toFixed(2) : 0,
-        ma5: maAt(i, 5), ma10: maAt(i, 10), ma20: maAt(i, 20), ma60: maAt(i, 60),
-      }));
+        for (let j = i - 19; j <= i; j++) s += closes[j];
+        return +(s / 20).toFixed(2);
+      });
+      const e12 = emaSeries(closes, 12), e26 = emaSeries(closes, 26);
+      const macd = closes.map((_, i) => e12[i] - e26[i]);
+      const sig = emaSeries(macd, 9);
+      const hist = macd.map((v, i) => v - sig[i]);
+      const full = rows.map((r, i) => {
+        const c = +r.close, m = ma20[i];
+        const aboveMA = m != null && c >= m;
+        const histUp = i > 0 && hist[i] > hist[i - 1];
+        const w = m == null ? null : (aboveMA ? (histUp ? "強風" : "亂流") : (histUp ? "陣風" : "無風"));
+        return {
+          d: dlabel(r.date),
+          o: +(+r.open).toFixed(2), h: +(+r.max).toFixed(2), l: +(+r.min).toFixed(2), c: +c.toFixed(2),
+          chg: i > 0 ? +(c - closes[i - 1]).toFixed(2) : 0,
+          pct: i > 0 && closes[i - 1] > 0 ? +((c - closes[i - 1]) / closes[i - 1] * 100).toFixed(2) : 0,
+          m,
+          s: (m != null && ma20[i - 1] != null) ? (m >= ma20[i - 1] ? 1 : -1) : 0,
+          w,
+        };
+      });
       const series = full.slice(-60);
-      if (series.length >= 20) kline = { series };
-    } else if (kraw.ok) {
-      console.log(`⚠️ 加權指數K線資料過少（${kraw.data.length} 筆），跳過`);
-    }
+      return series.length >= 20 ? { series } : null;
+    };
+    const idx = { tse: buildIdx(kraw, "加權"), otc: buildIdx(otcIdx, "櫃買") };
 
     const tailN = (map, n) => Object.keys(map).sort().slice(-n);
     const fD = tailN(fmap, 60), rD = tailN(rmap, 60), mD = tailN(mmap, 60);
     const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
     const pack = {
-      ok: !!(fD.length || rD.length || mD.length || kline),
+      ok: !!(fD.length || rD.length || mD.length || idx.tse || idx.otc),
       updatedAt: Date.now(),
-      kline,
+      idx,
       foreign: fD.length ? {
         series: mkSeries(fD, fmap, v => Math.round(v)),
         latest: Math.round(fmap[fD[fD.length - 1]]),
@@ -941,7 +970,7 @@ async function buildChipIndicators() {
     };
     if (pack.ok) {
       await kvPut("chip_indicators", pack, 86400 * 7);
-      console.log(`籌碼三指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天 / K線${kline ? kline.series.length : 0}根` +
+      console.log(`籌碼指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天 / 加權K${idx.tse ? idx.tse.series.length : 0} / 櫃買K${idx.otc ? idx.otc.series.length : 0}` +
         (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : "") +
         (pack.margin && pack.margin.mm ? `｜維持率=${pack.margin.mm[pack.margin.mm.length - 1].v}%` : "｜維持率:無"));
     } else {
@@ -1009,6 +1038,28 @@ async function buildTwTop50() {
       }));
     await kvPut("afterhours", surging, ttlUntilTw(14, 0));
     console.log(`盤後一條龍：對照表${merged.length}檔、掃描池${pool.length}檔、盤後追蹤${surging.length}檔`);
+
+    // ── 近五日K滾動庫：同一份行情順手存全市場當日 OHLC（盤中「近五日K」欄用，零額外API）──
+    try {
+      const prev5 = await kvGet("ohlc_5d");
+      const store = (prev5 && Array.isArray(prev5.dates) && prev5.map) ? prev5 : { dates: [], map: {} };
+      if (!store.dates.includes(date)) store.dates.push(date);
+      if (store.dates.length > 5) {
+        const drop = store.dates.length - 5;
+        store.dates = store.dates.slice(drop);
+        for (const c in store.map) store.map[c] = (store.map[c] || []).slice(drop);
+      }
+      const L = store.dates.length, idx = store.dates.indexOf(date);
+      for (const c in store.map) { const a = store.map[c]; while (a.length < L) a.push(null); }
+      for (const s of merged) {
+        if (!(s.o > 0 && s.close > 0)) continue;
+        if (!store.map[s.code]) store.map[s.code] = new Array(L).fill(null);
+        store.map[s.code][idx] = [s.o, s.h > 0 ? s.h : Math.max(s.o, s.close), s.l > 0 ? s.l : Math.min(s.o, s.close), s.close];
+      }
+      for (const c in store.map) { if (store.map[c].every(x => !x)) delete store.map[c]; }   // 清全空殘留
+      await kvPut("ohlc_5d", store, 86400 * 10);
+      console.log(`五日K滾動庫：${Object.keys(store.map).length} 檔 × ${L} 天（最新 ${date}）`);
+    } catch (e) { console.error("ohlc_5d error:", e.message); }
 
     // ── Top50：排除 ETF（代碼開頭 00，如 0050/0056/00878）──
     const isTwEtf = (code) => /^00/.test(String(code));   // 台股 ETF 代碼開頭 00
