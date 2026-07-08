@@ -1423,17 +1423,16 @@ app.get("/", (req, res) => {
 });
 
 // 個股新聞：即時查詢，不存 KV。
-// 品質分層：①黑名單（爆料同學會/個股概覽等純垃圾）直接丟 ②優質媒體排最前 ③一般來源居中 ④CMoney 網誌類墊底
-const NEWS_JUNK = [/股市爆料同學會/, /個股概覽/, /盤中焦點股速報彙整/];
+// 品質分層：①黑名單（CMoney 全系列/爆料同學會/個股概覽等）直接丟 ②優質媒體排最前 ③一般來源其後
+const NEWS_JUNK = [/股市爆料同學會/, /個股概覽/, /盤中焦點股速報彙整/, /CMoney/i, /投資網誌/];
 const NEWS_QUALITY = ["經濟日報", "工商時報", "鉅亨", "cnYES", "聯合新聞網", "UDN", "udn", "自由時報", "中時新聞", "中國時報",
   "TechNews", "科技新報", "MoneyDJ", "財經知識庫", "DIGITIMES", "電子時報", "財訊", "今周刊", "商業周刊",
-  "中央社", "ETtoday", "Yahoo", "風傳媒", "遠見", "天下雜誌", "非凡", "三立新聞", "TVBS"];
+  "中央社", "ETtoday", "Yahoo", "風傳媒", "遠見", "天下雜誌", "非凡", "三立新聞", "TVBS", "理財周刊"];
 function newsTier(item) {
   const t = item.title || "", s = item.src || "";
-  if (NEWS_JUNK.some(re => re.test(t) || re.test(s))) return -1;            // 垃圾 → 丟
+  if (NEWS_JUNK.some(re => re.test(t) || re.test(s))) return -1;            // 垃圾（含 CMoney 全系列）→ 丟
   if (NEWS_QUALITY.some(q => s.includes(q))) return 0;                       // 優質媒體 → 最前
-  if (/CMoney|投資網誌/i.test(s) || /CMoney/i.test(t)) return 2;             // CMoney 網誌類 → 墊底（留著，偶有分析料）
-  return 1;                                                                  // 其他 → 居中
+  return 1;                                                                  // 其他 → 其後
 }
 app.get("/api/stock-news", async (req, res) => {
   const name = (req.query.name || "").trim();
