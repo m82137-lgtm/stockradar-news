@@ -831,9 +831,18 @@ async function fetchTaifexVix(end) {
   for (const ym of months) {
     try {
       const url = `https://www.taifex.com.tw/file/taifex/Dailydownload/vix/log2data/${ym}new.txt`;
-      const r = await fetch(url, { headers: { "User-Agent": BROWSER_UA } });
-      if (!r.ok) { console.log(`⚠️ 台指VIX ${ym} 抓取失敗 status=${r.status}`); continue; }
+      // 加更完整的瀏覽器 headers 騙過雲主機軟擋（Referer/Accept/Accept-Language）
+      const r = await fetch(url, {
+        headers: {
+          "User-Agent": BROWSER_UA,
+          "Accept": "text/plain,text/html,application/xhtml+xml,*/*;q=0.8",
+          "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+          "Referer": "https://www.taifex.com.tw/cht/7/vixDaily3MNew",
+        },
+      });
       const txt = await r.text();
+      // 診斷 log：印狀態＋body開頭，判斷收到真資料還是反爬頁（HTML）
+      const before = Object.keys(map).length;
       for (const line of txt.split(/\r?\n/)) {
         // 檔案欄位用「多個 tab」對齊，故用 /\s+/ 切並濾空欄：[0]日期 [1]時間 [2]收盤VIX [3]收盤前1分均值
         const cols = line.trim().split(/\s+/).filter(Boolean);
@@ -843,6 +852,8 @@ async function fetchTaifexVix(end) {
         const v = parseFloat(cols[2]);       // 第 3 欄＝當日收盤 VIX
         if (isFinite(v) && v > 0) map[d] = v;
       }
+      const got = Object.keys(map).length - before;
+      console.log(`台指VIX ${ym}: status=${r.status} ok=${r.ok} len=${txt.length} 解析${got}筆 head=${JSON.stringify(txt.slice(0, 60))}`);
     } catch (e) { console.log(`⚠️ 台指VIX ${ym} error: ${e.message}`); }
   }
   return map;
