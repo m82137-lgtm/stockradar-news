@@ -881,11 +881,10 @@ async function buildChipIndicators() {
     const end = twTradingDate(0);
     const start = shiftDateStr(end, -100);   // 100 日曆天 ≈ 65+ 交易日，取尾 60
     const startK = shiftDateStr(end, -185);  // K線要 60 根＋前置 59 根算 60MA
-    const [fut, tmf0, mar, mmr, kraw, kraw2] = await Promise.all([
+    const [fut, tmf0, mar, kraw, kraw2] = await Promise.all([
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
       finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
-      finmindGet("TaiwanTotalExchangeMarginMaintenance", { start_date: start, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TAIEX", start_date: startK, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TPEx", start_date: startK, end_date: end }),
     ]);
@@ -907,7 +906,6 @@ async function buildChipIndicators() {
     if (!fut.ok) bad.push(`台指法人(status=${fut.status} msg=${(fut.msg||"-").slice(0,80)})`);
     if (!tmf.ok) bad.push(`微台/小台法人(status=${tmf.status} msg=${(tmf.msg||"-").slice(0,80)})`);
     if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
-    if (!mmr.ok) bad.push(`大盤維持率(status=${mmr.status} msg=${(mmr.msg||"-").slice(0,80)})`);
     if (!kraw.ok) bad.push(`加權指數K線(status=${kraw.status} msg=${(kraw.msg||"-").slice(0,80)})`);
     if (!otcIdx.ok) bad.push(`櫃買指數K線(status=${otcIdx.status} msg=${(otcIdx.msg||"-").slice(0,80)})`);
     if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
@@ -937,25 +935,6 @@ async function buildChipIndicators() {
     }
     if (!Object.keys(mmap).length && mar.data.length) console.log(`⚠️ 融資表 name 無匹配，清單：${[...names].join(",").slice(0, 200)}`);
 
-    // ④ 大盤融資維持率（TaiwanTotalExchangeMarginMaintenance）：欄位名防禦式解析
-    //    不確定 FinMind 欄位命名 → 逐列找第一個 50~400 之間的數值欄（維持率%量級），首次命中 log 欄位名
-    const ratioMap = {};
-    let ratioField = "";
-    if (mmr.ok) {
-      for (const r of mmr.data) {
-        if (!ratioField) {
-          for (const k in r) {
-            if (k === "date") continue;
-            const x = +r[k];
-            if (isFinite(x) && x > 50 && x < 400) { ratioField = k; break; }
-          }
-          if (ratioField) console.log(`維持率欄位確認=${ratioField}`);
-          else { console.log(`⚠️ 維持率欄位無法辨識，樣本鍵：${Object.keys(r).join(",").slice(0, 150)}`); break; }
-        }
-        const x = +r[ratioField];
-        if (isFinite(x) && x > 50 && x < 400) ratioMap[r.date] = x;
-      }
-    }
 
     // ⑤ 指數雙K（加權＋櫃買）：60 根 K 棒＋20MA＋均線彎向＋逐日風度
     //    風度真值表（與 Worker computeWindGauge 完全一致）：
@@ -1025,10 +1004,6 @@ async function buildChipIndicators() {
         balSeries: mkSeries(mD, mmap, o => +o.bal.toFixed(1)),
         bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
         chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
-        mm: (() => {
-          const dts = tailN(ratioMap, 45);
-          return dts.length ? mkSeries(dts, ratioMap, v => +(+v).toFixed(1)) : null;
-        })(),
       } : null,
       vix: (() => {
         const vd = Object.keys(vixMap).sort().slice(-45);
@@ -1045,7 +1020,6 @@ async function buildChipIndicators() {
       await kvPut("chip_indicators", pack, 86400 * 7);
       console.log(`籌碼指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天 / 加權K${idx.tse ? idx.tse.series.length : 0} / 櫃買K${idx.otc ? idx.otc.series.length : 0}` +
         (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : "") +
-        (pack.margin && pack.margin.mm ? `｜維持率=${pack.margin.mm[pack.margin.mm.length - 1].v}%` : "｜維持率:無") +
         (pack.vix ? `｜台指VIX=${pack.vix.latest}（${pack.vix.series.length}天）` : "｜台指VIX:無"));
     } else {
       console.log("⚠️ 籌碼三指標全空，未寫入 KV");
@@ -1053,6 +1027,55 @@ async function buildChipIndicators() {
     return pack;
   } catch (e) {
     console.error("buildChipIndicators error:", e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// ── 近五年高點（盤中「月K」欄 + Top50「創新高」欄用）：120 池逐檔查 FinMind 5 年日K，取「到昨天為止」最高 max ──
+// 每天台北 0:00 由 cron 產生（獨佔 FinMind 時段）。🔄 一鍵重建「不」觸發；驗證用 /api/tw-high5y 手動打。
+async function buildHigh5y() {
+  try {
+    const pool = await kvGet("pending_stocklist");
+    if (!Array.isArray(pool) || !pool.length) {
+      console.log("⚠️ 創新高 high5y：無 pending_stocklist，跳過");
+      return { ok: false, error: "no pending_stocklist" };
+    }
+    const asOf = twTradingDate(1);              // 昨天（最後完成的交易日；不含今天）
+    const start = shiftDateStr(asOf, -1830);    // ~5 年
+    const codes = [...new Set(pool.map(s => String(s.code)).filter(Boolean))];
+    const map = {};
+    const failed = [];
+    const CHUNK = 20;                           // 分批串行，錯開 FinMind 額度
+    for (let i = 0; i < codes.length; i += CHUNK) {
+      const batch = codes.slice(i, i + CHUNK);
+      const rs = await Promise.all(batch.map(code =>
+        finmindGet("TaiwanStockPrice", { data_id: code, start_date: start, end_date: asOf })
+          .then(r => ({ code, r }))
+      ));
+      for (const { code, r } of rs) {
+        if (!r.ok || !r.data.length) { failed.push(code); continue; }
+        let hi = 0;
+        for (const row of r.data) {
+          if (String(row.date) > asOf) continue;
+          const mx = +row.max;
+          if (isFinite(mx) && mx > hi) hi = mx;
+        }
+        if (hi > 0) map[code] = +hi.toFixed(2);
+        else failed.push(code);
+      }
+      if (i + CHUNK < codes.length) await new Promise(r => setTimeout(r, 250));
+    }
+    const pack = { ok: Object.keys(map).length > 0, updatedAt: Date.now(), asOf, count: Object.keys(map).length, map };
+    if (pack.ok) {
+      await kvPut("high5y", pack, 86400 * 7);
+      console.log(`創新高 high5y：${pack.count}/${codes.length} 檔，基準日 ${asOf}` +
+        (failed.length ? `（缺 ${failed.length}：${failed.slice(0, 8).join(",")}${failed.length > 8 ? "…" : ""}）` : ""));
+    } else {
+      console.log("⚠️ 創新高 high5y 全空，未寫入 KV");
+    }
+    return pack;
+  } catch (e) {
+    console.error("buildHigh5y error:", e.message);
     return { ok: false, error: e.message };
   }
 }
@@ -1149,6 +1172,20 @@ async function buildTwTop50() {
 
     // ── NEW / ▲▼ / 在榜天數：一律跟「昨天定榜」比（同日重跑不變；昨天缺角自動回看）──
     top50 = await applyBoardHistory("tw_board_history", date, top50, s => s.market === "OTC");
+
+    // ── 創新高：用現成 high5y 凍結旗標（零額外查詢）。建榜17:00時 high5y=「到昨天」＝正確基準；
+    //    凍進 tw_top50 → 事後幾點看都對，不隨 0:00 更新失真。──
+    try {
+      const h5pack = await kvGet("high5y");
+      const h5 = (h5pack && h5pack.map) ? h5pack.map : {};
+      let nhCount = 0;
+      for (const s of top50) {
+        const hv = h5[String(s.code)];
+        s.newHigh = (hv != null && s.price > hv);
+        if (s.newHigh) nhCount++;
+      }
+      console.log(`Top50 創新高：${nhCount}/${top50.length} 檔（high5y 基準 ${h5pack ? h5pack.asOf : "無"}）`);
+    } catch (e) { console.error("Top50 創新高 標記失敗:", e.message); }
 
     const otcCount = top50.filter(s => s.market === "OTC").length;
     const result = { ok: true, date, otcCount, count: top50.length, updatedAt: Date.now(), data: top50 };
@@ -1340,6 +1377,20 @@ app.get("/api/chip-indicators", async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// 創新高 high5y：手動觸發（驗證用；🔄 不含此）
+app.get("/api/tw-high5y", async (req, res) => {
+  try { res.json(await buildHigh5y()); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// 讀 KV high5y（驗證 asOf/count/map）
+app.get("/api/high5y", async (req, res) => {
+  try {
+    const d = await kvGet("high5y");
+    if (!d) return res.status(404).json({ ok: false, error: "尚無 high5y（每天台北 0:00 cron 產生，或先打 /api/tw-high5y）" });
+    res.json(d);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get("/api/tw-analysis", async (req, res) => {
   try {
     const cached = await kvGet("tw_analysis");
@@ -1393,7 +1444,7 @@ cron.schedule("0 9 * * *", async () => {   // 台北 17:00 (UTC 09:00)
     console.log(`台股 cron(17:00) date=${r && r.date}`);
   } catch (e) { console.error("台股 cron(17:00) error:", e.message); }
 });
-// 籌碼 17:45 班：FinMind 股價/期貨 17:30 更新完 → 當天傍晚就有新 K 棒與外資期貨（融資與維持率此時仍為前日值）
+// 籌碼 17:45 班：FinMind 股價/期貨 17:30 更新完 → 當天傍晚就有新 K 棒與外資期貨（融資此時仍為前日值）
 cron.schedule("45 9 * * *", async () => {   // 台北 17:45 (UTC 09:45)
   try {
     const p = await buildChipIndicators();
@@ -1415,6 +1466,14 @@ cron.schedule("0 10 * * *", async () => {   // 台北 18:00 補跑
     if (r && r.ok && r.data && r.data.length) await buildTwAnalysis(r.data, r.date);
     console.log(`台股 cron(18:00補) date=${r && r.date}`);
   } catch (e) { console.error("台股 cron(18:00補) error:", e.message); }
+});
+
+// 創新高 high5y：台北 0:00 獨佔 FinMind 時段算 120 池近五年高
+cron.schedule("0 16 * * *", async () => {   // 台北 0:00 (UTC 16:00)
+  try {
+    const p = await buildHigh5y();
+    console.log(`創新高 cron(0:00) ok=${p && p.ok} count=${p && p.count}`);
+  } catch (e) { console.error("創新高 cron error:", e.message); }
 });
 
 // 健康檢查（UptimeRobot ping 用）
