@@ -104,7 +104,7 @@ async function fetchGoogleRSS(keyword) {
   }
 }
 
-function parseRSS(rss) {
+function parseRSS(rss, limit = 20) {
   const items = [];
   const itemRegex = /<item>([\s\S]*?)<\/item>/g;
   let match;
@@ -137,7 +137,7 @@ function parseRSS(rss) {
     });
   }
 
-  return items.slice(0, 20);
+  return items.slice(0, limit);
 }
 
 function uniqueNews(items) {
@@ -1442,18 +1442,19 @@ app.get("/api/stock-news", async (req, res) => {
     return res.json([{ time: now(), keyword: "", items: [] }]);
   }
 
-  // 砍掉「純股名」那組（同名詞雜訊大本營，如「全新」會撈到全新EP/全新登台）。
-  // 改用「股名 股號」+「純股號」兩組，都要求含股號，雜訊在搜尋階段就被擋掉。
-  // name 為空（純股號查詢）時，第一組為空字串被濾掉，等同只搜股號。
+  // 「股名 股號」+「純股號」兩組，都要求含股號擋同名詞雜訊。
+  // 查詢階段就排除 CMoney（-排除語法）：否則 CMoney 一天十幾篇把 RSS 前20則 quota 吃光，
+  // 事後黑名單救不回被擠掉的正常新聞（曾致合晶只剩4則、7/8前全空）。
+  const EXCL = " -CMoney";
   const searches = [...new Set(
-    [name && code ? `${name} ${code}` : '', code].filter(q => q.trim())
+    [name && code ? `${name} ${code}${EXCL}` : '', code ? `${code}${EXCL}` : ''].filter(q => q.trim())
   )];
   let allItems = [];
 
   for (const q of searches) {
     try {
       const rss = await fetchGoogleRSS(q);
-      const items = parseRSS(rss);
+      const items = parseRSS(rss, 40);
       allItems.push(...items);
     } catch (e) {
       console.log("RSS fail:", q);
