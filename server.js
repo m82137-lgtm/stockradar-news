@@ -821,7 +821,9 @@ async function finmindGet(dataset, params = {}) {
 // 取當月＋前 2 月拼 45 交易日；免費、官方、穩定（跟抓 TWSE/tpex 同套路，加瀏覽器 UA）
 async function fetchTaifexVix(end) {
   const map = {};   // "YYYYMMDD" -> 收盤VIX
-  const yr = +end.slice(0, 4), mo = +end.slice(4, 6);
+  // end 是 "YYYY-MM-DD"（twTradingDate 回傳帶橫線）→ 用 split 拆，別用 slice
+  const parts = String(end).split("-");
+  const yr = +parts[0], mo = +parts[1];
   const months = [];
   for (let i = 0; i < 3; i++) {   // 當月 + 前 2 月（45 交易日約 2.1 個月，抓 3 個月保險）
     let m = mo - i, y = yr;
