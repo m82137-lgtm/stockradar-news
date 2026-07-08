@@ -77,11 +77,26 @@ async function kvPut(key, value, ttlSeconds) {
 }
 
 // ── Google RSS ─────────────────────────────────
+// Google News RSS：加瀏覽器 UA（防共享IP被當機器人）＋10分鐘記憶體快取（降請求量防限流）＋空結果印 status（診斷用）
+const _rssCache = new Map();   // keyword -> { at, text }
 async function fetchGoogleRSS(keyword) {
+  const hit = _rssCache.get(keyword);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.text;
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": BROWSER_UA,
+        "Accept": "application/rss+xml,application/xml,text/xml,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+      },
+    });
     const text = await res.text();
+    if (!res.ok || !text.includes("<item>")) {
+      console.log(`⚠️ Google RSS「${keyword}」空/擋：status=${res.status} len=${text.length}（共享IP限流約4hr自復）`);
+    }
+    if (text.includes("<item>")) _rssCache.set(keyword, { at: Date.now(), text });   // 只快取有料的
+    if (_rssCache.size > 200) _rssCache.clear();   // 防記憶體膨脹，粗暴清空即可
     return text;
   } catch (err) {
     console.log("RSS error:", err.message);
@@ -866,10 +881,11 @@ async function buildChipIndicators() {
     const end = twTradingDate(0);
     const start = shiftDateStr(end, -100);   // 100 日曆天 ≈ 65+ 交易日，取尾 60
     const startK = shiftDateStr(end, -185);  // K線要 60 根＋前置 59 根算 60MA
-    const [fut, tmf0, mar, kraw, kraw2] = await Promise.all([
+    const [fut, tmf0, mar, mmr, kraw, kraw2] = await Promise.all([
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
       finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
+      finmindGet("TaiwanTotalExchangeMarginMaintenance", { start_date: start, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TAIEX", start_date: startK, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TPEx", start_date: startK, end_date: end }),
     ]);
@@ -891,6 +907,7 @@ async function buildChipIndicators() {
     if (!fut.ok) bad.push(`台指法人(status=${fut.status} msg=${(fut.msg||"-").slice(0,80)})`);
     if (!tmf.ok) bad.push(`微台/小台法人(status=${tmf.status} msg=${(tmf.msg||"-").slice(0,80)})`);
     if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
+    if (!mmr.ok) bad.push(`大盤維持率(status=${mmr.status} msg=${(mmr.msg||"-").slice(0,80)})`);
     if (!kraw.ok) bad.push(`加權指數K線(status=${kraw.status} msg=${(kraw.msg||"-").slice(0,80)})`);
     if (!otcIdx.ok) bad.push(`櫃買指數K線(status=${otcIdx.status} msg=${(otcIdx.msg||"-").slice(0,80)})`);
     if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
@@ -919,6 +936,26 @@ async function buildChipIndicators() {
       mmap[r.date] = { bal, chg: ((+r.TodayBalance || 0) - (+r.YesBalance || 0)) / 1e8 };
     }
     if (!Object.keys(mmap).length && mar.data.length) console.log(`⚠️ 融資表 name 無匹配，清單：${[...names].join(",").slice(0, 200)}`);
+
+    // ④ 大盤融資維持率（TaiwanTotalExchangeMarginMaintenance）：欄位名防禦式解析
+    //    不確定 FinMind 欄位命名 → 逐列找第一個 50~400 之間的數值欄（維持率%量級），首次命中 log 欄位名
+    const ratioMap = {};
+    let ratioField = "";
+    if (mmr.ok) {
+      for (const r of mmr.data) {
+        if (!ratioField) {
+          for (const k in r) {
+            if (k === "date") continue;
+            const x = +r[k];
+            if (isFinite(x) && x > 50 && x < 400) { ratioField = k; break; }
+          }
+          if (ratioField) console.log(`維持率欄位確認=${ratioField}`);
+          else { console.log(`⚠️ 維持率欄位無法辨識，樣本鍵：${Object.keys(r).join(",").slice(0, 150)}`); break; }
+        }
+        const x = +r[ratioField];
+        if (isFinite(x) && x > 50 && x < 400) ratioMap[r.date] = x;
+      }
+    }
 
     // ⑤ 指數雙K（加權＋櫃買）：60 根 K 棒＋20MA＋均線彎向＋逐日風度
     //    風度真值表（與 Worker computeWindGauge 完全一致）：
@@ -988,6 +1025,10 @@ async function buildChipIndicators() {
         balSeries: mkSeries(mD, mmap, o => +o.bal.toFixed(1)),
         bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
         chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
+        mm: (() => {
+          const dts = tailN(ratioMap, 45);
+          return dts.length ? mkSeries(dts, ratioMap, v => +(+v).toFixed(1)) : null;
+        })(),
       } : null,
       vix: (() => {
         const vd = Object.keys(vixMap).sort().slice(-45);
@@ -1004,6 +1045,7 @@ async function buildChipIndicators() {
       await kvPut("chip_indicators", pack, 86400 * 7);
       console.log(`籌碼指標更新：外資${fD.length}天 / ${retailLabel}${rD.length}天 / 融資${mD.length}天 / 加權K${idx.tse ? idx.tse.series.length : 0} / 櫃買K${idx.otc ? idx.otc.series.length : 0}` +
         (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : "") +
+        (pack.margin && pack.margin.mm ? `｜維持率=${pack.margin.mm[pack.margin.mm.length - 1].v}%` : "｜維持率:無") +
         (pack.vix ? `｜台指VIX=${pack.vix.latest}（${pack.vix.series.length}天）` : "｜台指VIX:無"));
     } else {
       console.log("⚠️ 籌碼三指標全空，未寫入 KV");
@@ -1351,7 +1393,7 @@ cron.schedule("0 9 * * *", async () => {   // 台北 17:00 (UTC 09:00)
     console.log(`台股 cron(17:00) date=${r && r.date}`);
   } catch (e) { console.error("台股 cron(17:00) error:", e.message); }
 });
-// 籌碼 17:45 班：FinMind 股價/期貨 17:30 更新完 → 當天傍晚就有新 K 棒與外資期貨（融資此時仍為前日值）
+// 籌碼 17:45 班：FinMind 股價/期貨 17:30 更新完 → 當天傍晚就有新 K 棒與外資期貨（融資與維持率此時仍為前日值）
 cron.schedule("45 9 * * *", async () => {   // 台北 17:45 (UTC 09:45)
   try {
     const p = await buildChipIndicators();
@@ -1380,7 +1422,19 @@ app.get("/", (req, res) => {
   res.send("stockradar-news running");
 });
 
-// 個股新聞：即時查詢，3 組關鍵字，不存 KV
+// 個股新聞：即時查詢，不存 KV。
+// 品質分層：①黑名單（爆料同學會/個股概覽等純垃圾）直接丟 ②優質媒體排最前 ③一般來源居中 ④CMoney 網誌類墊底
+const NEWS_JUNK = [/股市爆料同學會/, /個股概覽/, /盤中焦點股速報彙整/];
+const NEWS_QUALITY = ["經濟日報", "工商時報", "鉅亨", "cnYES", "聯合新聞網", "UDN", "udn", "自由時報", "中時新聞", "中國時報",
+  "TechNews", "科技新報", "MoneyDJ", "財經知識庫", "DIGITIMES", "電子時報", "財訊", "今周刊", "商業周刊",
+  "中央社", "ETtoday", "Yahoo", "風傳媒", "遠見", "天下雜誌", "非凡", "三立新聞", "TVBS"];
+function newsTier(item) {
+  const t = item.title || "", s = item.src || "";
+  if (NEWS_JUNK.some(re => re.test(t) || re.test(s))) return -1;            // 垃圾 → 丟
+  if (NEWS_QUALITY.some(q => s.includes(q))) return 0;                       // 優質媒體 → 最前
+  if (/CMoney|投資網誌/i.test(s) || /CMoney/i.test(t)) return 2;             // CMoney 網誌類 → 墊底（留著，偶有分析料）
+  return 1;                                                                  // 其他 → 居中
+}
 app.get("/api/stock-news", async (req, res) => {
   const name = (req.query.name || "").trim();
   const code = (req.query.code || "").trim();
@@ -1407,7 +1461,13 @@ app.get("/api/stock-news", async (req, res) => {
     }
   }
 
-  const sorted = uniqueNews(allItems).sort((a, b) => new Date(b.pub) - new Date(a.pub)).slice(0, 30);
+  // 分層排序：先層級（優質→一般→CMoney）、同層依時間新→舊；黑名單直接濾除
+  const sorted = uniqueNews(allItems)
+    .map(it => ({ ...it, _tier: newsTier(it) }))
+    .filter(it => it._tier >= 0)
+    .sort((a, b) => (a._tier - b._tier) || (new Date(b.pub) - new Date(a.pub)))
+    .slice(0, 30)
+    .map(({ _tier, ...it }) => it);
   res.json([{
     time: now(),
     keyword: `${name} ${code}`,
