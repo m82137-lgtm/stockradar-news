@@ -840,7 +840,7 @@ async function fetchTaifexVix(end) {
   const parts = String(end).split("-");
   const yr = +parts[0], mo = +parts[1];
   const months = [];
-  for (let i = 0; i < 3; i++) {   // 當月 + 前 2 月（45 交易日約 2.1 個月，抓 3 個月保險）
+  for (let i = 0; i < 4; i++) {   // 當月 + 前 3 月（60 交易日約 2.9 個月，月初邊界需 4 個月才夠）
     let m = mo - i, y = yr;
     while (m <= 0) { m += 12; y -= 1; }
     months.push(`${y}${String(m).padStart(2, "0")}`);
@@ -976,13 +976,13 @@ async function buildChipIndicators() {
           w,
         };
       });
-      const series = full.slice(-45);   // 六卡統一 45 交易日
+      const series = full.slice(-60);   // 存 60 交易日（前端依裝置切：手機30/桌機60）
       return series.length >= 20 ? { series } : null;
     };
     const idx = { tse: buildIdx(kraw, "加權"), otc: buildIdx(otcIdx, "櫃買") };
 
     const tailN = (map, n) => Object.keys(map).sort().slice(-n);
-    const fD = tailN(fmap, 45), rD = tailN(rmap, 45), mD = tailN(mmap, 45);
+    const fD = tailN(fmap, 60), rD = tailN(rmap, 60), mD = tailN(mmap, 60);
     const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
     const pack = {
       ok: !!(fD.length || rD.length || mD.length || idx.tse || idx.otc),
@@ -1006,7 +1006,7 @@ async function buildChipIndicators() {
         chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
       } : null,
       vix: (() => {
-        const vd = Object.keys(vixMap).sort().slice(-45);
+        const vd = Object.keys(vixMap).sort().slice(-60);
         if (!vd.length) return null;
         const lbl = d => d.slice(4, 6) + "/" + d.slice(6, 8);   // YYYYMMDD → MM/DD
         return {
