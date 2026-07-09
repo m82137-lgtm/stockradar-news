@@ -1031,7 +1031,8 @@ async function buildChipIndicators() {
   }
 }
 
-// ── 近五年高點（盤中「月K」欄 + Top50「創新高」欄用）：120 池逐檔查 FinMind 5 年日K，取「到昨天為止」最高 max ──
+// ── 月K創新高基準（盤中「月K」欄 + Top50「創新高」欄用）：120 池逐檔查 FinMind 5 年日K，
+//    排除最近 22 交易日後取最高 max＋高點日期 → {v,d}。突破＝「至少一個月沒看過的高價」──
 // 每天台北 0:00 由 cron 產生（獨佔 FinMind 時段）。🔄 一鍵重建「不」觸發；驗證用 /api/tw-high5y 手動打。
 async function buildHigh5y() {
   try {
@@ -1054,14 +1055,18 @@ async function buildHigh5y() {
       ));
       for (const { code, r } of rs) {
         if (!r.ok || !r.data.length) { failed.push(code); continue; }
-        let hi = 0;
-        for (const row of r.data) {
-          if (String(row.date) > asOf) continue;
+        // 月K創新高定義：排除最近 22 交易日（台股月均），取「一個月前為止」的近五年最高＋高點日期
+        const rows = r.data
+          .filter(row => String(row.date) <= asOf && isFinite(+row.max) && +row.max > 0)
+          .sort((a, b) => (a.date < b.date ? -1 : 1));
+        const usable = rows.slice(0, Math.max(0, rows.length - 22));   // 挖掉最近一個月
+        let hi = 0, hiD = "";
+        for (const row of usable) {
           const mx = +row.max;
-          if (isFinite(mx) && mx > hi) hi = mx;
+          if (mx > hi) { hi = mx; hiD = row.date; }
         }
-        if (hi > 0) map[code] = +hi.toFixed(2);
-        else failed.push(code);
+        if (hi > 0) map[code] = { v: +hi.toFixed(2), d: hiD };
+        else failed.push(code);   // 資料不足22筆（新上市）或無有效價
       }
       if (i + CHUNK < codes.length) await new Promise(r => setTimeout(r, 250));
     }
@@ -1181,8 +1186,9 @@ async function buildTwTop50() {
       let nhCount = 0;
       for (const s of top50) {
         const hv = h5[String(s.code)];
-        s.newHigh = (hv != null && s.price > hv);
-        if (s.newHigh) nhCount++;
+        const val = hv == null ? null : (typeof hv === "number" ? hv : hv.v);   // 兼容舊格式（純數字）
+        s.newHigh = (val != null && s.price > val);
+        if (s.newHigh) { nhCount++; if (hv && hv.d) s.nhD = hv.d; }             // 凍高點日期供前端顯示「破N年前高」
       }
       console.log(`Top50 創新高：${nhCount}/${top50.length} 檔（high5y 基準 ${h5pack ? h5pack.asOf : "無"}）`);
     } catch (e) { console.error("Top50 創新高 標記失敗:", e.message); }
