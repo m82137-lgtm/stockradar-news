@@ -1046,6 +1046,17 @@ async function buildHigh5y() {
     const codes = [...new Set(pool.map(s => String(s.code)).filter(Boolean))];
     const map = {};
     const failed = [];
+    // ── RS 相對動能（20交易日、全體 vs 加權）：吃現成 chip_indicators 的加權日K，零額外 API ──
+    const rsMap = {};
+    let idxCloseByDate = null;
+    try {
+      const chip = await kvGet("chip_indicators");
+      const tseSeries = chip && chip.idx && chip.idx.tse && Array.isArray(chip.idx.tse.series) ? chip.idx.tse.series : [];
+      if (tseSeries.length >= 25) {
+        idxCloseByDate = {};
+        for (const b of tseSeries) { const c = +b.c; if (b.d && isFinite(c) && c > 0) idxCloseByDate[String(b.d)] = c; }
+      } else console.log("⚠️ RS動能：chip_indicators 指數K不足，本輪跳過 RS");
+    } catch (e) { console.log("⚠️ RS動能：讀 chip_indicators 失敗，本輪跳過（" + e.message + "）"); }
     const CHUNK = 20;                           // 分批串行，錯開 FinMind 額度
     for (let i = 0; i < codes.length; i += CHUNK) {
       const batch = codes.slice(i, i + CHUNK);
@@ -1067,6 +1078,21 @@ async function buildHigh5y() {
         }
         if (hi > 0) map[code] = { v: +hi.toFixed(2), d: hiD };
         else failed.push(code);   // 資料不足22筆（新上市）或無有效價
+        // RS 相對動能：近20交易日「個股倍率 ÷ 加權倍率 −1」(%)；
+        // 護欄：不滿21根→不給值；相鄰兩根變動>±10.5%（台股漲跌停極限外）→視為除權息/減資缺口，不給值
+        if (idxCloseByDate) {
+          const closes = rows.map(x => ({ d: String(x.date), c: +x.close })).filter(x => isFinite(x.c) && x.c > 0);
+          if (closes.length >= 21) {
+            const seg = closes.slice(-21);
+            let gap = false;
+            for (let j = 1; j < seg.length; j++) { if (Math.abs(seg[j].c / seg[j - 1].c - 1) > 0.105) { gap = true; break; } }
+            const i0 = idxCloseByDate[seg[20].d], i20 = idxCloseByDate[seg[0].d];
+            if (!gap && i0 && i20) {
+              const rsv = +((((seg[20].c / seg[0].c) / (i0 / i20)) - 1) * 100).toFixed(1);
+              if (isFinite(rsv)) rsMap[code] = rsv;
+            }
+          }
+        }
       }
       if (i + CHUNK < codes.length) await new Promise(r => setTimeout(r, 250));
     }
@@ -1077,6 +1103,26 @@ async function buildHigh5y() {
         (failed.length ? `（缺 ${failed.length}：${failed.slice(0, 8).join(",")}${failed.length > 8 ? "…" : ""}）` : ""));
     } else {
       console.log("⚠️ 創新高 high5y 全空，未寫入 KV");
+    }
+    // ── rs20 寫入：map[code]={v:今日值, d:較昨日變化}；base=小數字基準（同日重跑凍結）──
+    if (idxCloseByDate && Object.keys(rsMap).length) {
+      const oldRs = await kvGet("rs20");
+      let baseMap = {}, baseAsOf = null;
+      if (oldRs && oldRs.asOf === asOf && oldRs.base && oldRs.base.map) {
+        baseMap = oldRs.base.map; baseAsOf = oldRs.base.asOf;          // 同日重跑：基準凍結
+      } else if (oldRs && oldRs.map) {
+        baseAsOf = oldRs.asOf;                                          // 跨日：昨日值滾動成新基準
+        for (const [k, x] of Object.entries(oldRs.map)) { const bv = (x && typeof x === "object") ? x.v : x; if (bv != null) baseMap[k] = bv; }
+      }
+      const rsOut = {};
+      for (const [k, v] of Object.entries(rsMap)) {
+        const b = baseMap[k];
+        rsOut[k] = { v, d: (b == null ? null : +(v - b).toFixed(1)) };
+      }
+      const rsPack = { ok: true, updatedAt: Date.now(), asOf, count: Object.keys(rsOut).length, map: rsOut, base: { asOf: baseAsOf, map: baseMap } };
+      await kvPut("rs20", rsPack, 86400 * 7);
+      const vals = Object.values(rsMap).sort((a, b) => b - a);
+      console.log(`RS動能 rs20：${rsPack.count}/${codes.length} 檔（max ${vals[0]}、min ${vals[vals.length - 1]}、中位 ${vals[Math.floor(vals.length / 2)]}）基準日 ${asOf}`);
     }
     return pack;
   } catch (e) {
