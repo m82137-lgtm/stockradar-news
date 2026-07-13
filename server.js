@@ -977,7 +977,11 @@ async function buildChipIndicators() {
         };
       });
       const series = full.slice(-60);   // 存 60 交易日（前端依裝置切：手機30/桌機60）
-      return series.length >= 20 ? { series } : null;
+      if (series.length < 20) return null;
+      // 盤中即時風度「MACD存檔點」：最後一根的 ema12/ema26/sig9 原始值
+      // （MACD遞迴，前端/Worker 拿存檔點＋即時價四行乘法即可延伸今日暫定柱，免回傳185根重算）
+      const li = closes.length - 1;
+      return { series, ema12: +e12[li].toFixed(4), ema26: +e26[li].toFixed(4), sig9: +sig[li].toFixed(4) };
     };
     const idx = { tse: buildIdx(kraw, "加權"), otc: buildIdx(otcIdx, "櫃買") };
 
