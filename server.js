@@ -1057,6 +1057,8 @@ async function buildHigh5y() {
         for (const b of tseSeries) { const c = +b.c; if (b.d && isFinite(c) && c > 0) idxCloseByDate[String(b.d)] = c; }
       } else console.log("⚠️ RS動能：chip_indicators 指數K不足，本輪跳過 RS");
     } catch (e) { console.log("⚠️ RS動能：讀 chip_indicators 失敗，本輪跳過（" + e.message + "）"); }
+    // chip 的 d 是 dlabel 後的 "MM/DD"（07-13 確診：ISO 查 MM/DD 全空）；此函式兩種格式都吃
+    const idxAt = (ds) => idxCloseByDate ? (idxCloseByDate[ds] ?? idxCloseByDate[String(ds).slice(5).replace("-", "/")]) : undefined;
     const CHUNK = 20;                           // 分批串行，錯開 FinMind 額度
     for (let i = 0; i < codes.length; i += CHUNK) {
       const batch = codes.slice(i, i + CHUNK);
@@ -1086,7 +1088,7 @@ async function buildHigh5y() {
             const seg = closes.slice(-21);
             let gap = false;
             for (let j = 1; j < seg.length; j++) { if (Math.abs(seg[j].c / seg[j - 1].c - 1) > 0.105) { gap = true; break; } }
-            const i0 = idxCloseByDate[seg[20].d], i20 = idxCloseByDate[seg[0].d];
+            const i0 = idxAt(seg[20].d), i20 = idxAt(seg[0].d);
             if (!gap && i0 && i20) {
               const rsv = +((((seg[20].c / seg[0].c) / (i0 / i20)) - 1) * 100).toFixed(1);
               if (isFinite(rsv)) rsMap[code] = rsv;
@@ -1123,6 +1125,8 @@ async function buildHigh5y() {
       await kvPut("rs20", rsPack, 86400 * 7);
       const vals = Object.values(rsMap).sort((a, b) => b - a);
       console.log(`RS動能 rs20：${rsPack.count}/${codes.length} 檔（max ${vals[0]}、min ${vals[vals.length - 1]}、中位 ${vals[Math.floor(vals.length / 2)]}）基準日 ${asOf}`);
+    } else if (idxCloseByDate) {
+      console.log("⚠️ RS動能：rsMap 全空（日期對不上或全被護欄擋），未寫入 rs20");
     }
     return pack;
   } catch (e) {
