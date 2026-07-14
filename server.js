@@ -974,6 +974,7 @@ async function buildChipIndicators() {
           m,
           s: (m != null && ma20[i - 1] != null) ? (m >= ma20[i - 1] ? 1 : -1) : 0,
           w,
+          dif: +macd[i].toFixed(2), hist: +hist[i].toFixed(2),   // MACD副圖（12,26,9）：DIF與柱，訊號線=dif-hist 前端自推
         };
       });
       const series = full.slice(-60);   // 存 60 交易日（前端依裝置切：手機30/桌機60）
