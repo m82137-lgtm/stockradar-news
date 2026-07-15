@@ -885,19 +885,25 @@ async function fetchMarginDetail(ymd) {
     console.log(`⚠️ 維持率 MI_MARGN ${ymd}：表結構不符（tables=${tables.length} 明細=${det ? det.data.length : 0} 金額=${amountK} 單位=${totalUnits}）`);
     return null;
   }
+  // ⚠️ 代號不是只有純數字：槓桿/反向ETF(00631L、00632R)、特別股(2887B)、外幣ETF(第六碼K/M/S/C)都帶字母。
+  //    2026-07-15 首次上線就是被 /^\d{4,6}$/ 濾掉這些，對帳短少 23.46%。改成「數字開頭」即可。
   const units = {};
-  let sum = 0;
+  let sum = 0, skipN = 0, skipU = 0;
   for (const row of det.data) {
     const code = twseCode(row[0]);
-    if (!/^\d{4,6}$/.test(code)) continue;
     const u = twseNum(row[6]);           // 融資今日餘額（張）
+    if (!/^\d/.test(code) || code.length < 4) { if (u) { skipN++; skipU += u; } continue; }
     if (u == null) continue;
     units[code] = u; sum += u;
   }
+  if (skipU) console.log(`維持率 ${ymd}：代號不合格式跳過 ${skipN} 檔／${skipU} 張`);
   // 對帳點：個股加總 vs 統計總額。對不上＝欄位抓錯，直接放棄（不給假數字）
   const diff = totalUnits ? Math.abs(sum - totalUnits) / totalUnits : 1;
   if (diff > 0.005) {
-    console.log(`⚠️ 維持率 ${ymd} 對帳失敗：個股加總=${sum} vs 統計總額=${totalUnits}（差 ${(diff * 100).toFixed(2)}%）→ 放棄`);
+    // 遺言：印出前 5 大融資檔＋跳過量，下次不用瞎猜是哪裡漏
+    const top = Object.entries(units).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([c, u]) => `${c}:${u}`).join(" ");
+    console.log(`⚠️ 維持率 ${ymd} 對帳失敗：個股加總=${sum}（${Object.keys(units).length}檔）vs 統計總額=${totalUnits}` +
+      `（差 ${(diff * 100).toFixed(2)}%／${totalUnits - sum} 張）→ 放棄｜跳過 ${skipN}檔/${skipU}張｜前5大 ${top}`);
     return null;
   }
   return { units, totalUnits, amountK };
@@ -916,7 +922,7 @@ async function fetchCloseMap(ymd) {
   const map = {};
   for (const row of t.data) {
     const c = twseCode(row[iCode]), p = twseNum(row[iClose]);
-    if (/^\d{4,6}$/.test(c) && p != null && p > 0) map[c] = p;
+    if (/^\d/.test(c) && c.length >= 4 && p != null && p > 0) map[c] = p;
   }
   return Object.keys(map).length > 500 ? map : null;
 }
