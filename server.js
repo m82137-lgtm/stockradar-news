@@ -1724,6 +1724,175 @@ app.get("/api/tv-source-test", async (req, res) => {
   res.json(out);
 });
 
+// ══ 日韓美 Top30（TradingView 統一源）══════════════════════════════════
+// 全市場成交值排行（日3922/韓2740/美11777檔），濾特別股、換台幣、貼中文名。
+// KV：tv_jp_top30 / tv_kr_top30 / tv_us_top30（互不干擾，us_top50 舊管線原封不動）。
+// 中文對照表＝翻譯貼紙：缺了顯示原文，排行照樣正確；想補直接在表裡加一行。
+const TV_ZH_JP = {
+  "285A":["凱俠控股","記憶體"], "8035":["東京威力科創","半導體設備"], "6857":["愛德萬測試","半導體測試"], "6146":["迪思科","半導體設備"],
+  "6920":["雷泰光電","半導體檢測設備"], "7735":["SCREEN控股","半導體設備"], "4063":["信越化學","半導體材料"], "3436":["SUMCO","矽晶圓"],
+  "6723":["瑞薩電子","半導體"], "6963":["羅姆","功率半導體"], "6526":["索思未來","IC設計"], "6981":["村田製作所","電子零組件"],
+  "6762":["TDK","電子零組件"], "6971":["京瓷","電子零組件"], "6954":["發那科","工業機器人"], "6594":["尼得科","精密馬達"],
+  "6273":["SMC","氣動元件"], "6367":["大金工業","空調"], "6501":["日立製作所","綜合電機"], "6503":["三菱電機","綜合電機"],
+  "6702":["富士通","資訊科技"], "6701":["NEC","資訊科技"], "9613":["NTT DATA","資訊服務"], "6758":["索尼集團","消費電子"],
+  "7974":["任天堂","遊戲"], "9766":["科樂美","遊戲"], "7832":["萬代南夢宮","遊戲玩具"], "9984":["軟銀集團","投資控股"],
+  "9434":["軟銀","電信"], "9432":["NTT","電信"], "9433":["KDDI","電信"], "8306":["三菱日聯金融","銀行"],
+  "8316":["三井住友金融","銀行"], "8411":["瑞穗金融","銀行"], "8604":["野村控股","證券"], "8601":["大和證券","證券"],
+  "8766":["東京海上","保險"], "8750":["第一生命","保險"], "8591":["歐力士","綜合金融"], "6178":["日本郵政","郵政金融"],
+  "7203":["豐田汽車","汽車製造"], "7267":["本田汽車","汽車製造"], "7201":["日產汽車","汽車製造"], "6902":["電裝","汽車零件"],
+  "5108":["普利司通","輪胎"], "8058":["三菱商事","綜合商社"], "8001":["伊藤忠商事","綜合商社"], "8031":["三井物產","綜合商社"],
+  "8053":["住友商事","綜合商社"], "8002":["丸紅","綜合商社"], "9983":["迅銷","服飾零售"], "3382":["7&i控股","零售"],
+  "8267":["永旺","零售"], "9843":["宜得利控股","家居零售"], "4568":["第一三共","製藥"], "4519":["中外製藥","製藥"],
+  "4502":["武田藥品","製藥"], "4543":["泰爾茂","醫療器材"], "7741":["豪雅","光學鏡片"], "7751":["佳能","精密儀器"],
+  "4901":["富士軟片","精密化學"], "2914":["日本菸草","菸草"], "2802":["味之素","食品材料"], "7011":["三菱重工","重工防衛"],
+  "7012":["川崎重工","重工防衛"], "7013":["IHI","重工防衛"], "6301":["小松製作所","工程機械"], "5401":["日本製鐵","鋼鐵"],
+  "5713":["住友金屬礦山","金屬礦業"], "1605":["INPEX","能源開發"], "5019":["出光興產","煉油"], "9501":["東京電力HD","電力"],
+  "9503":["關西電力","電力"], "9101":["日本郵船","航運"], "9104":["商船三井","航運"], "9107":["川崎汽船","航運"],
+  "9020":["JR東日本","鐵路"], "8801":["三井不動產","不動產"], "8802":["三菱地所","不動產"], "4661":["東方樂園","主題樂園"],
+  "6098":["Recruit控股","人力平台"], "4755":["樂天集團","電商網路"], "5803":["藤倉","電線電纜"], "5802":["住友電工","電線電纜"],
+  "5801":["古河電工","電線電纜"],
+};
+const TV_ZH_KR = {
+  "005930":["三星電子","半導體與消費電子"], "000660":["SK海力士","記憶體"], "402340":["SK Square","半導體投資控股"], "009150":["三星電機","電子零組件"],
+  "042700":["韓美半導體","半導體設備"], "240810":["圓益IPS","半導體設備"], "403870":["HPSP","半導體設備"], "000990":["DB HiTek","晶圓代工"],
+  "373220":["LG新能源","電池"], "006400":["三星SDI","電池"], "051910":["LG化學","化學電池"], "086520":["Ecopro","電池材料"],
+  "247540":["EcoproBM","電池材料"], "003670":["POSCO未來M","電池材料"], "005490":["POSCO控股","鋼鐵"], "010130":["高麗亞鉛","金屬冶煉"],
+  "005380":["現代汽車","汽車製造"], "000270":["起亞","汽車製造"], "012330":["現代摩比斯","汽車零件"], "034020":["斗山能源","發電設備"],
+  "267260":["HD現代電機","電力設備"], "298040":["曉星重工業","電力設備"], "042660":["韓華海洋","造船"], "009540":["HD韓國造船海洋","造船"],
+  "329180":["HD現代重工","造船"], "010140":["三星重工","造船"], "012450":["韓華航太","航太防衛"], "047810":["韓國航太","航太防衛"],
+  "079550":["LIG Nex1","防衛"], "068270":["賽特瑞恩","生技製藥"], "207940":["三星生物製劑","生技代工"], "326030":["SK生物製藥","製藥"],
+  "000100":["柳韓洋行","製藥"], "035420":["NAVER","網路平台"], "035720":["Kakao","網路平台"], "323410":["KakaoBank","網路銀行"],
+  "377300":["KakaoPay","行動支付"], "036570":["NCsoft","遊戲"], "259960":["Krafton","遊戲"], "251270":["網石","遊戲"],
+  "352820":["HYBE","娛樂經紀"], "041510":["SM娛樂","娛樂經紀"], "017670":["SK電訊","電信"], "030200":["KT","電信"],
+  "066570":["LG電子","消費電子"], "003550":["LG","投資控股"], "034730":["SK","投資控股"], "028260":["三星物產","綜合商社"],
+  "018260":["三星SDS","資訊服務"], "096770":["SK創新","能源電池"], "010950":["S-Oil","煉油"], "015760":["韓國電力","電力"],
+  "011200":["HMM","航運"], "105560":["KB金融","金融"], "055550":["新韓金融","金融"], "086790":["韓亞金融","金融"],
+  "316140":["友利金融","金融"], "000810":["三星火災","保險"], "032830":["三星生命","保險"], "006800":["未來資產證券","證券"],
+  "090430":["愛茉莉太平洋","化妝品"], "051900":["LG生活健康","化妝品"], "097950":["CJ第一製糖","食品"],
+};
+// TradingView sector → 中文（對照表沒中的檔用這個當產業標籤兜底）
+const TV_SECTOR_ZH = {
+  "Electronic Technology":"電子科技", "Technology Services":"科技服務", "Finance":"金融", "Communications":"電信通訊",
+  "Consumer Durables":"耐久消費品", "Consumer Non-Durables":"民生消費", "Consumer Services":"消費服務", "Retail Trade":"零售",
+  "Health Technology":"醫療科技", "Health Services":"醫療服務", "Producer Manufacturing":"工業製造", "Industrial Services":"工業服務",
+  "Process Industries":"原料加工", "Energy Minerals":"能源", "Non-Energy Minerals":"金屬礦業", "Utilities":"公用事業",
+  "Transportation":"運輸", "Distribution Services":"貿易流通", "Commercial Services":"商業服務", "Miscellaneous":"其他",
+};
+const TV_MK = { japan: { kv: "tv_jp_top30", fxPair: "JPYTWD", zh: TV_ZH_JP }, korea: { kv: "tv_kr_top30", fxPair: "KRWTWD", zh: TV_ZH_KR }, america: { kv: "tv_us_top30", fxPair: "USDTWD", zh: null } };
+
+// 匯率：TradingView forex 點名查價（一源到底；Yahoo v8 在 Render IP 已實測 429 勿回頭）
+async function tvFetchFx() {
+  const tickers = ["FX_IDC:USDTWD", "FX_IDC:JPYTWD", "FX_IDC:KRWTWD"];
+  const out = { USDTWD: null, JPYTWD: null, KRWTWD: null };
+  try {
+    const r = await fetch("https://scanner.tradingview.com/forex/scan", {
+      method: "POST",
+      headers: {
+        "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+        "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+      },
+      body: JSON.stringify({ symbols: { tickers, query: { types: [] } }, columns: ["close"] }),
+    });
+    const j = r.ok ? JSON.parse(await r.text()) : null;
+    if (j && Array.isArray(j.data)) for (const d of j.data) {
+      const key = String(d.s || "").replace("FX_IDC:", "");
+      if (key in out && Number.isFinite(d.d && d.d[0])) out[key] = d.d[0];
+    }
+  } catch (e) { console.error("日韓美 匯率抓取失敗:", e.message); }
+  return out;
+}
+
+// 建一個市場的 Top30。fx 可傳入（cron 一輪只抓一次）；rate 抓不到 → ntd 全 null（護欄：不硬給假台幣）
+async function buildTvTop30(market, phase, fx) {
+  const mk = TV_MK[market];
+  if (!mk) return { ok: false, error: `未知市場 ${market}` };
+  const body = {
+    filter: [{ left: "type", operation: "equal", right: "stock" }],
+    options: { lang: "en" },
+    markets: [market],
+    symbols: { query: { types: [] }, tickers: [] },
+    columns: TV_SCAN_COLUMNS,
+    sort: { sortBy: "Value.Traded", sortOrder: "desc" },
+    range: [0, 60], // 多抓一截，濾掉特別股後仍足 30
+  };
+  const resp = await fetch(`https://scanner.tradingview.com/${market}/scan`, {
+    method: "POST",
+    headers: {
+      "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+      "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+    },
+    body: JSON.stringify(body),
+  });
+  const raw = await resp.text();
+  if (!resp.ok) { console.error(`日韓美 ${market} 掃描 HTTP ${resp.status}`); return { ok: false, error: `HTTP ${resp.status}`, head: raw.slice(0, 120) }; }
+  let j = null; try { j = JSON.parse(raw); } catch {}
+  if (!j || !Array.isArray(j.data) || !j.data.length) { console.error(`日韓美 ${market} 掃描回包異常`); return { ok: false, error: "回包異常", head: raw.slice(0, 120) }; }
+  const rate = fx ? fx[mk.fxPair] : null;
+  const list = [];
+  for (const r of j.data) {
+    const d = {}; TV_SCAN_COLUMNS.forEach((c, i) => { d[c] = r.d[i]; });
+    if (d.subtype === "preferred") continue; // 濾特別股（同公司重複資訊，對齊參考站版面）
+    const [ex, code] = String(r.s || "").split(":");
+    const hit = mk.zh && mk.zh[code];
+    list.push({
+      rank: list.length + 1, code, ex,
+      name: d.description || d.name || code,
+      zh: hit ? hit[0] : null,
+      ind: hit ? hit[1] : (TV_SECTOR_ZH[d.sector] || d.sector || "—"),
+      close: d.close, chg: Number.isFinite(d.change) ? Math.round(d.change * 100) / 100 : null,
+      val: d["Value.Traded"], cur: d.currency,
+      ntd: (Number.isFinite(rate) && Number.isFinite(d["Value.Traded"])) ? Math.round(d["Value.Traded"] * rate / 1e8 * 10) / 10 : null, // 台幣億，1位小數
+    });
+    if (list.length >= 30) break;
+  }
+  const result = { ok: true, market, phase, asOf: new Date().toISOString(), fx: { pair: mk.fxPair, rate: Number.isFinite(rate) ? rate : null }, count: list.length, list };
+  await kvPut(mk.kv, result, 86400 * 3);
+  return result;
+}
+
+// 台北時區今天星期幾（0=日）
+function twDow() { return new Date(Date.now() + 8 * 3600e3).getUTCDay(); }
+
+async function runTvCron(markets, phase, label) {
+  const fx = await tvFetchFx();
+  for (const m of markets) {
+    try {
+      const r = await buildTvTop30(m, phase, fx);
+      console.log(`日韓美 cron(${label}) ${m} ok=${r && r.ok} count=${(r && r.count) || 0} rate=${r && r.fx ? r.fx.rate : null}`);
+    } catch (e) { console.error(`日韓美 cron(${label}) ${m} error:`, e.message); }
+    await new Promise(r => setTimeout(r, 400)); // 控速
+  }
+}
+// 班表（UTC）：日韓＝台北平日 8:45 早盤、15:00 收盤、15:30 補；美＝台北週二~六 7:30、8:00 補（美股台北清晨4~5點收）
+cron.schedule("45 0 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "live", "8:45早盤"); });
+cron.schedule("0 7 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "final", "15:00收盤"); });
+cron.schedule("30 7 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "final", "15:30補"); });
+cron.schedule("30 23 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runTvCron(["america"], "final", "7:30美股"); });
+cron.schedule("0 0 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runTvCron(["america"], "final", "8:00美股補"); });
+
+// 前端主讀：一次回三市場
+app.get("/api/tv-top30", async (req, res) => {
+  try {
+    const [jp, kr, us] = await Promise.all([kvGet("tv_jp_top30"), kvGet("tv_kr_top30"), kvGet("tv_us_top30")]);
+    res.json({ ok: true, jp: jp || null, kr: kr || null, us: us || null });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// 手動重建：/api/tv-rebuild（全部）或 ?market=jp|kr|us
+app.get("/api/tv-rebuild", async (req, res) => {
+  try {
+    const pick = String(req.query.market || "all");
+    const map = { jp: "japan", kr: "korea", us: "america" };
+    const markets = pick === "all" ? ["japan", "korea", "america"] : [map[pick] || pick];
+    const fx = await tvFetchFx();
+    const out = {};
+    for (const m of markets) {
+      out[m] = await buildTvTop30(m, "manual", fx);
+      await new Promise(r => setTimeout(r, 400));
+    }
+    res.json({ ok: true, fx, ...out });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 // 重建/補齊維持率滾動庫（首次＝回溯60天約120發，之後只補缺的）
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try { res.json(await buildMarginRatio(+req.query.days || 60)); }
