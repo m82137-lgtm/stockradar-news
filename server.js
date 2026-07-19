@@ -1646,6 +1646,73 @@ app.get("/api/source-test", async (req, res) => {
   try { out.calc = await calcMarginRatio(ymd); } catch (e) { out.calc = { error: e.message }; }
   res.json(out);
 });
+// ── TradingView scanner 生死測試（日韓美 Top30 前置偵察）──────────────
+// 只讀不寫 KV、不動任何現有功能。用法：
+//   /api/tv-source-test                  → japan / korea / america 三市場全測＋匯率
+//   /api/tv-source-test?market=japan     → 單測一個市場
+// 驗什麼：HTTP 通不通、Value.Traded（成交值）排序有沒有料、代號格式、
+//         type/subtype 長怎樣（之後濾 ETF 用）、sector 給不給、匯率 Yahoo v8 活不活。
+const TV_SCAN_COLUMNS = ["name", "description", "close", "change", "volume", "Value.Traded", "currency", "type", "subtype", "sector", "exchange"];
+async function tvScan(market, topN = 5) {
+  const t0 = Date.now();
+  const body = {
+    filter: [{ left: "type", operation: "equal", right: "stock" }],
+    options: { lang: "en" },
+    markets: [market],
+    symbols: { query: { types: [] }, tickers: [] },
+    columns: TV_SCAN_COLUMNS,
+    sort: { sortBy: "Value.Traded", sortOrder: "desc" },
+    range: [0, 50],
+  };
+  const resp = await fetch(`https://scanner.tradingview.com/${market}/scan`, {
+    method: "POST",
+    headers: {
+      "User-Agent": BROWSER_UA,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      "Origin": "https://www.tradingview.com",
+      "Referer": "https://www.tradingview.com/",
+    },
+    body: JSON.stringify(body),
+  });
+  const raw = await resp.text();
+  if (!resp.ok) return { ok: false, status: resp.status, ms: Date.now() - t0, head: raw.slice(0, 200) };
+  let j = null; try { j = JSON.parse(raw); } catch {}
+  if (!j || !Array.isArray(j.data)) return { ok: false, status: resp.status, ms: Date.now() - t0, parse: "FAIL", head: raw.slice(0, 200) };
+  const rows = j.data.map(r => { const o = { ticker: r.s }; TV_SCAN_COLUMNS.forEach((c, i) => { o[c] = r.d[i]; }); return o; });
+  return {
+    ok: true, status: resp.status, ms: Date.now() - t0,
+    totalCount: j.totalCount ?? null, rows: rows.length,
+    nullCols: TV_SCAN_COLUMNS.filter(c => rows.every(r => r[c] == null)),
+    top: rows.slice(0, topN).map(r => ({
+      ticker: r.ticker, name: r.name, desc: r.description, close: r.close, chg: r.change,
+      valueTraded: r["Value.Traded"], cur: r.currency, type: r.type, sub: r.subtype, sector: r.sector,
+    })),
+  };
+}
+app.get("/api/tv-source-test", async (req, res) => {
+  const markets = req.query.market ? [String(req.query.market)] : ["japan", "korea", "america"];
+  const out = { at: new Date().toISOString() };
+  for (const m of markets) {
+    try { out[m] = await tvScan(m); } catch (e) { out[m] = { ok: false, error: e.message }; }
+    await new Promise(r => setTimeout(r, 500)); // 控速
+  }
+  // 匯率順手驗（Yahoo v8 chart；台幣換算＋備援體系一起測生死）
+  out.fx = {};
+  for (const pair of ["JPYTWD=X", "KRWTWD=X", "USDTWD=X"]) {
+    try {
+      const r2 = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(pair)}?range=1d&interval=1d`, {
+        headers: { "User-Agent": BROWSER_UA, "Accept": "application/json" },
+      });
+      const j2 = r2.ok ? await r2.json() : null;
+      const meta = j2 && j2.chart && j2.chart.result && j2.chart.result[0] ? j2.chart.result[0].meta : null;
+      out.fx[pair] = meta ? { ok: true, price: meta.regularMarketPrice ?? null, time: meta.regularMarketTime ?? null } : { ok: false, status: r2.status };
+    } catch (e) { out.fx[pair] = { ok: false, error: e.message }; }
+    await new Promise(r => setTimeout(r, 300)); // 控速
+  }
+  res.json(out);
+});
+
 // 重建/補齊維持率滾動庫（首次＝回溯60天約120發，之後只補缺的）
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try { res.json(await buildMarginRatio(+req.query.days || 60)); }
