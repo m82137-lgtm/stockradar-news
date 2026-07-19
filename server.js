@@ -1697,19 +1697,30 @@ app.get("/api/tv-source-test", async (req, res) => {
     try { out[m] = await tvScan(m); } catch (e) { out[m] = { ok: false, error: e.message }; }
     await new Promise(r => setTimeout(r, 500)); // 控速
   }
-  // 匯率順手驗（Yahoo v8 chart；台幣換算＋備援體系一起測生死）
+  // 匯率（TradingView forex 市場點名查價，一源到底）
+  // Yahoo v8 已於 2026-07-20 實測從 Render 機房 IP 回 429，棄用、勿回頭
   out.fx = {};
-  for (const pair of ["JPYTWD=X", "KRWTWD=X", "USDTWD=X"]) {
-    try {
-      const r2 = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(pair)}?range=1d&interval=1d`, {
-        headers: { "User-Agent": BROWSER_UA, "Accept": "application/json" },
-      });
-      const j2 = r2.ok ? await r2.json() : null;
-      const meta = j2 && j2.chart && j2.chart.result && j2.chart.result[0] ? j2.chart.result[0].meta : null;
-      out.fx[pair] = meta ? { ok: true, price: meta.regularMarketPrice ?? null, time: meta.regularMarketTime ?? null } : { ok: false, status: r2.status };
-    } catch (e) { out.fx[pair] = { ok: false, error: e.message }; }
-    await new Promise(r => setTimeout(r, 300)); // 控速
-  }
+  try {
+    const fxTickers = ["FX_IDC:USDTWD", "FX_IDC:JPYTWD", "FX_IDC:KRWTWD"];
+    const r2 = await fetch("https://scanner.tradingview.com/forex/scan", {
+      method: "POST",
+      headers: {
+        "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+        "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+      },
+      body: JSON.stringify({ symbols: { tickers: fxTickers, query: { types: [] } }, columns: ["close"] }),
+    });
+    const raw2 = await r2.text();
+    let j2 = null; try { j2 = JSON.parse(raw2); } catch {}
+    if (!r2.ok || !j2 || !Array.isArray(j2.data)) {
+      out.fx = { ok: false, status: r2.status, head: raw2.slice(0, 200) };
+    } else {
+      for (const t of fxTickers) {
+        const hit = j2.data.find(d => d.s === t);
+        out.fx[t] = hit ? { ok: true, close: hit.d[0] } : { ok: false, error: "無此代號" };
+      }
+    }
+  } catch (e) { out.fx = { ok: false, error: e.message }; }
   res.json(out);
 });
 
