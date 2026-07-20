@@ -1773,6 +1773,31 @@ const TV_ZH_KR = {
   "475150":["SK Eternix","再生能源"], "353200":["大德電子","IC載板"], "004310":["現代藥品","製藥"], "010120":["LS電氣","電力設備"],
   "011070":["LG Innotek","光學元件"], "028300":["HLB","生技製藥"], "080220":["濟州半導體","記憶體"],
 };
+const TV_ZH_US = {
+  "MU":["美光","記憶體"], "NVDA":["輝達","AI晶片"], "SNDK":["晟碟","記憶體"], "AAPL":["蘋果","消費電子"],
+  "AMD":["超微","AI晶片"], "META":["Meta","社群媒體"], "MSFT":["微軟","雲端軟體"], "INTC":["英特爾","半導體"],
+  "TSLA":["特斯拉","電動車"], "AMZN":["亞馬遜","電商雲端"], "GOOGL":["Alphabet A","網路平台"], "GOOG":["Alphabet C","網路平台"],
+  "NFLX":["網飛","串流媒體"], "AVGO":["博通","AI晶片"], "WDC":["威騰電子","儲存裝置"], "STX":["希捷","儲存裝置"],
+  "MRVL":["邁威爾","AI晶片"], "AMAT":["應用材料","半導體設備"], "LRCX":["科林研發","半導體設備"], "KLAC":["科磊","半導體設備"],
+  "ASML":["艾司摩爾","半導體設備"], "TSM":["台積電ADR","晶圓代工"], "ORCL":["甲骨文","雲端軟體"], "UNH":["聯合健康","醫療保險"],
+  "NBIS":["Nebius","AI雲端"], "PLTR":["Palantir","AI軟體"], "ISRG":["直覺手術","醫療器材"], "BE":["Bloom Energy","燃料電池"],
+  "LITE":["Lumentum","光通訊"], "GEV":["GE Vernova","電力設備"], "LLY":["禮來","製藥"], "WMT":["沃爾瑪","零售"],
+  "SPCX":["太空探索SpaceX","太空"], "QCOM":["高通","手機晶片"], "TXN":["德州儀器","類比晶片"], "SMCI":["美超微","AI伺服器"],
+  "DELL":["戴爾","AI伺服器"], "HPQ":["惠普","電腦硬體"], "IBM":["IBM","資訊科技"], "CRM":["Salesforce","雲端軟體"],
+  "ADBE":["Adobe","軟體"], "NOW":["ServiceNow","雲端軟體"], "COIN":["Coinbase","加密交易所"], "MSTR":["微策略","比特幣持股"],
+  "HOOD":["Robinhood","券商平台"], "JPM":["摩根大通","銀行"], "BAC":["美國銀行","銀行"], "GS":["高盛","投資銀行"],
+  "MS":["摩根士丹利","投資銀行"], "C":["花旗","銀行"], "WFC":["富國銀行","銀行"], "V":["Visa","支付"],
+  "MA":["萬事達","支付"], "PYPL":["PayPal","支付"], "BRK.B":["波克夏B","投資控股"], "XOM":["艾克森美孚","石油"],
+  "CVX":["雪佛龍","石油"], "COP":["康菲","石油"], "BA":["波音","航太"], "LMT":["洛克希德馬丁","國防"],
+  "RTX":["RTX","國防航太"], "GE":["奇異航太","航太"], "CAT":["開拓重工","工程機械"], "DE":["迪爾","農業機械"],
+  "COST":["好市多","量販零售"], "HD":["家得寶","居家修繕"], "SBUX":["星巴克","餐飲"], "MCD":["麥當勞","餐飲"],
+  "NKE":["Nike","運動用品"], "DIS":["迪士尼","娛樂媒體"], "PFE":["輝瑞","製藥"], "JNJ":["嬌生","製藥醫療"],
+  "MRK":["默沙東","製藥"], "ABBV":["艾伯維","製藥"], "NVO":["諾和諾德","減肥藥"], "UBER":["Uber","共享出行"],
+  "ABNB":["Airbnb","旅宿平台"], "ARM":["安謀","IC設計"], "INTU":["Intuit","財務軟體"], "CSCO":["思科","網路設備"],
+  "ANET":["Arista","網路設備"], "VRT":["維諦","AI電力"], "CEG":["星座能源","核電"], "VST":["Vistra","電力"],
+  "OKLO":["Oklo","核能"], "IONQ":["IonQ","量子運算"], "CRWD":["CrowdStrike","資安"], "PANW":["Palo Alto","資安"],
+  "SNOW":["Snowflake","資料雲"], "SHOP":["Shopify","電商平台"], "BABA":["阿里巴巴","中概電商"],
+};
 // TradingView sector → 中文（對照表沒中的檔用這個當產業標籤兜底）
 const TV_SECTOR_ZH = {
   "Electronic Technology":"電子科技", "Technology Services":"科技服務", "Finance":"金融", "Communications":"電信通訊",
@@ -1781,7 +1806,7 @@ const TV_SECTOR_ZH = {
   "Process Industries":"原料加工", "Energy Minerals":"能源", "Non-Energy Minerals":"金屬礦業", "Utilities":"公用事業",
   "Transportation":"運輸", "Distribution Services":"貿易流通", "Commercial Services":"商業服務", "Miscellaneous":"其他",
 };
-const TV_MK = { japan: { kv: "tv_jp_top30", fxPair: "JPYTWD", zh: TV_ZH_JP }, korea: { kv: "tv_kr_top30", fxPair: "KRWTWD", zh: TV_ZH_KR }, america: { kv: "tv_us_top30", fxPair: "USDTWD", zh: null } };
+const TV_MK = { japan: { kv: "tv_jp_top30", fxPair: "JPYTWD", zh: TV_ZH_JP }, korea: { kv: "tv_kr_top30", fxPair: "KRWTWD", zh: TV_ZH_KR }, america: { kv: "tv_us_top30", fxPair: "USDTWD", zh: TV_ZH_US } };
 
 // 匯率：TradingView forex 點名查價（一源到底；Yahoo v8 在 Render IP 已實測 429 勿回頭）
 async function tvFetchFx() {
