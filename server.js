@@ -1923,9 +1923,8 @@ app.get("/api/tv-rebuild", async (req, res) => {
 
 // 重建/補齊維持率滾動庫（首次＝回溯60天約120發，之後只補缺的）
 // ── 融資 v2 偵察彈（上市＋上櫃前置）：探 TPEx 歷史端點生死與格式，只讀不寫 ──
+// v2（07-20）：①抽 tables 的 summary 合計列與 notes（找融資金額總計）②挖 swagger 九條融資端點的說明＋回應欄位 ③OpenAPI 融資端點實測
 // 用法：/api/margin-probe（預設最近交易日）或 ?d=2026-07-17
-// 目標：①OpenAPI swagger 目錄（官方到底有哪些融資端點，不用猜名）②舊制融資餘額表(帶民國日期)
-//       ③新制 www 融資端點 ④舊制上櫃歷史收盤 ⑤新制 www 上櫃歷史收盤
 app.get("/api/margin-probe", async (req, res) => {
   const iso = String(req.query.d || twTradingDate(0));           // YYYY-MM-DD
   const [yy, mm, dd] = iso.split("-");
@@ -1942,13 +1941,32 @@ app.get("/api/margin-probe", async (req, res) => {
       const r = await fetch(url, { headers: H });
       const txt = await r.text();
       let j = null; try { j = JSON.parse(txt); } catch {}
-      const out = { name, url, status: r.status, ms: Date.now() - t0, len: txt.length, isJson: !!j, head: txt.slice(0, 260) };
+      const out = { name, url, status: r.status, ms: Date.now() - t0, len: txt.length, isJson: !!j, head: txt.slice(0, 200) };
       if (j) {
         out.topKeys = Object.keys(j).slice(0, 12);
         if (Array.isArray(j)) { out.arrLen = j.length; out.firstItem = j[0]; }
-        if (j.tables) out.tables = j.tables.map(t => ({ title: (t.title || "").slice(0, 30), fields: (t.fields || []).slice(0, 14), rows: (t.data || []).length }));
-        if (j.aaData) { out.aaLen = j.aaData.length; out.aaFirst = j.aaData[0]; out.aaTfoot = j.tfootData ? j.tfootData.slice(0, 14) : null; }
-        if (j.paths) out.marginPaths = Object.keys(j.paths).filter(p => /margin|sbl|balance|融資/i.test(p)).slice(0, 20); // swagger 目錄濾融資相關
+        if (j.tables) out.tables = j.tables.map(t => ({
+          title: (t.title || "").slice(0, 30), rows: (t.data || []).length,
+          keys: Object.keys(t),
+          summary: t.summary || null,          // ← 合計列（找融資金額）
+          notes: t.notes ? String(JSON.stringify(t.notes)).slice(0, 300) : null,
+        }));
+        if (j.paths) {
+          // swagger：挖每條融資端點的說明＋回應 schema 欄位名
+          const schemaFields = (ref) => {
+            try {
+              const key = String(ref || "").split("/").pop();
+              const sch = j.components && j.components.schemas && j.components.schemas[key];
+              return sch && sch.properties ? Object.keys(sch.properties).slice(0, 24) : null;
+            } catch { return null; }
+          };
+          out.marginDetail = Object.keys(j.paths).filter(p => /margin|sbl|balance/i.test(p)).slice(0, 12).map(p => {
+            const g = j.paths[p].get || {};
+            let ref = null;
+            try { ref = g.responses["200"].content["application/json"].schema.items.$ref; } catch {}
+            return { p, sum: (g.summary || g.description || "").slice(0, 60), fields: schemaFields(ref) };
+          });
+        }
       }
       return out;
     } catch (e) { return { name, url, error: e.message, ms: Date.now() - t0 }; }
@@ -1956,11 +1974,8 @@ app.get("/api/margin-probe", async (req, res) => {
   const out = { at: new Date().toISOString(), iso, roc, probes: [] };
   const targets = [
     ["swagger目錄", "https://www.tpex.org.tw/openapi/swagger.json"],
-    ["swagger目錄v1", "https://www.tpex.org.tw/openapi/v1/swagger.json"],
     ["舊制_融資餘額表", `https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d=${encodeURIComponent(roc)}`],
-    ["新制_融資餘額", `https://www.tpex.org.tw/www/zh-tw/margin/balance?date=${encodeURIComponent(roc)}&response=json`],
-    ["舊制_上櫃收盤", `https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&d=${encodeURIComponent(roc)}&se=EW&o=json`],
-    ["新制_上櫃收盤", `https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=${encodeURIComponent(roc)}&response=json`],
+    ["OpenAPI_上櫃融資餘額", "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance"],
   ];
   for (const [name, url] of targets) {
     out.probes.push(await hit(name, url));
