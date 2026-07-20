@@ -1866,8 +1866,8 @@ async function runTvCron(markets, phase, label) {
     await new Promise(r => setTimeout(r, 400)); // 控速
   }
 }
-// 班表（UTC）：日韓＝台北平日 8:45 早盤、15:00 收盤、15:30 補；美＝台北週二~六 7:30、8:00 補（美股台北清晨4~5點收）
-cron.schedule("45 0 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "live", "8:45早盤"); });
+// 班表（UTC）：日韓＝台北平日 8:45~14:45 每小時盤中班、15:00 收盤、15:30 補；美＝台北週二~六 7:30、8:00 補（美股台北清晨4~5點收）
+cron.schedule("45 0-6 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "live", "盤中每時"); });
 cron.schedule("0 7 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "final", "15:00收盤"); });
 cron.schedule("30 7 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "final", "15:30補"); });
 cron.schedule("30 23 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runTvCron(["america"], "final", "7:30美股"); });
@@ -2267,6 +2267,63 @@ function prevTradingDayFrom(dateStr, n = 1) {
   return d.toISOString().slice(0, 10);
 }
 
+// ── 美股 Top50 主力源（07-20 換源：TradingView，清晨班；Polygon 版留在下方當備胎）──
+// 輸出欄位與 Polygon 版完全相同 {rank,code,name,price,chg,dollarVol,vol}＋帳本欄位 → 前端零改動、us_board_history 無縫續寫
+async function buildUsTop50Tv() {
+  try {
+    const body = {
+      filter: [{ left: "type", operation: "equal", right: "stock" }],
+      options: { lang: "en" },
+      markets: ["america"],
+      symbols: { query: { types: [] }, tickers: [] },
+      columns: TV_SCAN_COLUMNS,
+      sort: { sortBy: "Value.Traded", sortOrder: "desc" },
+      range: [0, 70], // 多抓一截，濾特別股/黑名單後仍足 50
+    };
+    const resp = await fetch("https://scanner.tradingview.com/america/scan", {
+      method: "POST",
+      headers: {
+        "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+        "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+      },
+      body: JSON.stringify(body),
+    });
+    const raw = await resp.text();
+    if (!resp.ok) return { ok: false, error: `TV HTTP ${resp.status}`, data: [] };
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    if (!j || !Array.isArray(j.data) || !j.data.length) return { ok: false, error: "TV 回包異常", data: [] };
+
+    const rows = [];
+    for (const r of j.data) {
+      const d = {}; TV_SCAN_COLUMNS.forEach((c, i) => { d[c] = r.d[i]; });
+      if (d.subtype === "preferred") continue;               // 濾特別股
+      const code = String(r.s || "").split(":")[1] || "";
+      if (!code || isUsEtf(code)) continue;                  // 舊黑名單續用當第二道保險（type=stock 已擋大宗 ETF）
+      if (!Number.isFinite(d.close) || d.close <= 0) continue;
+      rows.push({
+        code, name: d.description || code,
+        price: Math.round(d.close * 100) / 100,
+        chg: Number.isFinite(d.change) ? Math.round(d.change * 100) / 100 : 0,
+        dollarVol: Math.round(d["Value.Traded"] || 0), vol: d.volume || 0,
+      });
+      if (rows.length >= 50) break;
+    }
+    if (rows.length < 30) return { ok: false, error: `TV 有效檔數不足(${rows.length})`, data: [] }; // 護欄：殘缺榜不上架
+
+    let top50 = rows.map((s, i) => ({ rank: i + 1, ...s }));
+    const date = usPrevTradingDate(0); // 7:30(UTC23:30 base0)與 8:00(UTC00:00 base1)恰好都指向剛收盤那個交易日
+    top50 = await applyBoardHistory("us_board_history", date, top50, null);
+
+    const result = { ok: true, date, count: top50.length, updatedAt: Date.now(), data: top50, source: "tradingview" };
+    await kvPut("us_top50", result, 86400 * 3);
+    console.log(`美股Top50(TV)：date=${date} 共${top50.length}檔，新進榜${top50.filter(s => s.isNew).length}檔`);
+    return result;
+  } catch (e) {
+    console.error("buildUsTop50Tv error:", e.message);
+    return { ok: false, error: e.message, data: [] };
+  }
+}
+
 async function buildUsTop50() {
   if (!POLYGON_KEY) return { ok: false, error: "POLYGON_KEY 未設定", data: [] };
   try {
@@ -2318,7 +2375,7 @@ app.get("/api/us-top50", async (req, res) => {
   try {
     const cached = await kvGet("us_top50");
     if (cached && cached.ok && Array.isArray(cached.data) && cached.data.length) return res.json(cached);
-    const fresh = await buildUsTop50();
+    const fresh = await buildUsTop50Tv();
     if (!fresh.ok) return res.status(502).json(fresh);
     res.json(fresh);
   } catch (e) {
@@ -2329,10 +2386,21 @@ app.get("/api/us-top50", async (req, res) => {
 // 手動觸發（測試用，非阻塞）
 app.get("/api/us-rebuild", async (req, res) => {
   try {
+    const r = await buildUsTop50Tv();
+    if (!r.ok) return res.status(502).json(r);
+    buildUsAnalysis(r.data, r.date).catch(e => console.error("background analysis:", e.message));
+    res.json({ ok: true, date: r.date, count: r.count, source: "tradingview", note: "行情已更新，AI題材分析背景生成中" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+// Polygon 備胎（TV 掛掉時的手動出榜；口徑略異，帳本同一本續寫）
+app.get("/api/us-rebuild-poly", async (req, res) => {
+  try {
     const r = await buildUsTop50();
     if (!r.ok) return res.status(502).json(r);
     buildUsAnalysis(r.data, r.date).catch(e => console.error("background analysis:", e.message));
-    res.json({ ok: true, date: r.date, count: r.count, note: "行情已更新，AI題材分析背景生成中" });
+    res.json({ ok: true, date: r.date, count: r.count, source: "polygon", note: "備胎源出榜，AI題材分析背景生成中" });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -2590,17 +2658,22 @@ app.get("/api/us-snapshot", async (req, res) => {
 
 // cron：每天台北13:00抓美股（UTC 05:00）。實測 Polygon 免費版當天資料約台北下午1點 ready
 // 1點半(UTC 05:30)再補跑一次：若1點時資料還沒完全好，補抓當天最新（雙保險）
+// 07-20 換源：主力＝TradingView 清晨班（台北7:30/8:00，週二~六守門；美股週日沒開盤所以台北週日一不跑）
+// Gemini 題材分析跟班：建榜成功順勢生成，你開盤前榜＋分析全就位
 async function runUsCron(label) {
   try {
-    const r = await buildUsTop50();
+    const r = await buildUsTop50Tv();
     if (r && r.ok && r.data && r.data.length) await buildUsAnalysis(r.data, r.date);
-    console.log(`美股 cron(${label}) 完成：date=${r && r.date}`);
+    console.log(`美股 cron(${label}) 完成：date=${r && r.date} source=${(r && r.source) || "?"}`);
   } catch (e) {
     console.error(`美股 cron(${label}) error:`, e.message);
   }
 }
-cron.schedule("0 5 * * *", () => runUsCron("13:00"));    // 台北下午1點
-cron.schedule("30 5 * * *", () => runUsCron("13:30補"));  // 台北下午1點半補跑
+cron.schedule("30 23 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runUsCron("7:30"); });
+cron.schedule("0 0 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runUsCron("8:00補"); });
+// Polygon 舊班（07-20 停用留備胎；TV 掛掉時打 /api/us-rebuild-poly 手動出榜）：
+// cron.schedule("0 5 * * *", () => runUsCron("13:00"));    // 台北下午1點
+// cron.schedule("30 5 * * *", () => runUsCron("13:30補"));  // 台北下午1點半補跑
 
 app.listen(PORT, async () => {
   console.log(`Server running on ${PORT}`);
