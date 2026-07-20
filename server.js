@@ -927,35 +927,100 @@ async function fetchCloseMap(ymd) {
   return Object.keys(map).length > 500 ? map : null;
 }
 
-// 單日維持率：ymd = YYYYMMDD → { d:"MM/DD", v:百分比 } 或 null
-async function calcMarginRatio(ymd) {
-  const [det, close] = await Promise.all([fetchMarginDetail(ymd), fetchCloseMap(ymd)]);
-  if (!det || !close) return null;
-  let mv = 0, hit = 0, miss = 0;
-  for (const code in det.units) {
-    const u = det.units[code], p = close[code];
-    if (!u) continue;                      // 無融資餘額的檔跳過
-    if (p == null) { miss += u; continue; } // 有融資但查無收盤價（暫停交易等）
-    mv += u * 1000 * p; hit++;
+// ── 上櫃（TPEx）雙料（2026-07-20 融資v2）：格式依 margin-probe 實測 ──
+// 融資餘額表 tables[0]：data=[0代號,1名稱,2前資餘額,3資買,4資賣,5現償,6資餘額,...]
+//   summary=[["","合計(張)",…,第7欄=張數合計],["","融資金(仟元)",…,第7欄=今日融資金額餘額]]
+const isoToRoc = (ymd) => `${(+ymd.slice(0, 4)) - 1911}/${ymd.slice(4, 6)}/${ymd.slice(6, 8)}`;
+async function fetchTpexMargin(ymd) {
+  const url = `https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d=${encodeURIComponent(isoToRoc(ymd))}`;
+  const res = await fetchHtml(url);
+  let json; try { json = JSON.parse(res); } catch { console.log(`⚠️ 維持率 TPEx融資 ${ymd}：非 JSON，len=${(res || "").length}`); return null; }
+  const t = json.tables && json.tables[0];
+  if (!t || !Array.isArray(t.data) || t.data.length < 300) { console.log(`⚠️ 維持率 TPEx融資 ${ymd}：無資料（rows=${t && t.data ? t.data.length : 0}）`); return null; }
+  let totalUnits = null, amountK = null;
+  for (const s of (t.summary || [])) {
+    const tag = String(s[1] || "");
+    if (tag.includes("合計")) totalUnits = twseNum(s[6]);
+    else if (tag.includes("融資金")) amountK = twseNum(s[6]);
   }
-  const denom = det.amountK * 1000;        // 仟元 → 元
-  if (!denom || !hit) return null;
-  const ratio = mv / denom * 100;
-  if (!(ratio > 80 && ratio < 400)) {      // 合理區間護欄：正常落在 130~180
-    console.log(`⚠️ 維持率 ${ymd} 算出 ${ratio.toFixed(1)}% 不合理 → 放棄（市值=${mv} 融資額=${denom}）`);
+  if (totalUnits == null || amountK == null) {
+    console.log(`⚠️ 維持率 TPEx融資 ${ymd}：summary 找不到合計/融資金（${JSON.stringify((t.summary || []).map(s => s[1]))}）`);
     return null;
   }
-  if (miss) console.log(`維持率 ${ymd}：${miss} 張查無收盤價（已排除）`);
-  return { d: `${ymd.slice(4, 6)}/${ymd.slice(6, 8)}`, v: +ratio.toFixed(1) };
+  const units = {}; let sum = 0, skipN = 0, skipU = 0;
+  for (const row of t.data) {
+    const code = twseCode(row[0]);
+    const u = twseNum(row[6]);           // 資餘額（張）
+    if (!/^\d/.test(code) || code.length < 4) { if (u) { skipN++; skipU += u; } continue; }
+    if (u == null) continue;
+    units[code] = u; sum += u;
+  }
+  if (skipU) console.log(`維持率 TPEx ${ymd}：代號不合格式跳過 ${skipN} 檔／${skipU} 張`);
+  const diff = totalUnits ? Math.abs(sum - totalUnits) / totalUnits : 1;
+  if (diff > 0.005) {
+    const top = Object.entries(units).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([c, u]) => `${c}:${u}`).join(" ");
+    console.log(`⚠️ 維持率 TPEx ${ymd} 對帳失敗：個股加總=${sum} vs 合計=${totalUnits}（差 ${(diff * 100).toFixed(2)}%）→ 放棄｜前5大 ${top}`);
+    return null;
+  }
+  return { units, totalUnits, amountK };
+}
+// 上櫃歷史收盤：stk_wn1430 tables[0]=[0代號,1名稱,2收盤,...]（無成交「--」由 twseNum 自然變 null 跳過）
+async function fetchTpexCloseMap(ymd) {
+  const url = `https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&d=${encodeURIComponent(isoToRoc(ymd))}&se=EW&o=json`;
+  const res = await fetchHtml(url);
+  let json; try { json = JSON.parse(res); } catch { console.log(`⚠️ 維持率 TPEx收盤 ${ymd}：非 JSON，len=${(res || "").length}`); return null; }
+  const t = json.tables && json.tables[0];
+  if (!t || !Array.isArray(t.data)) { console.log(`⚠️ 維持率 TPEx收盤 ${ymd}：無表`); return null; }
+  const map = {};
+  for (const row of t.data) {
+    const c = twseCode(row[0]), p = twseNum(row[2]);
+    if (/^\d/.test(c) && c.length >= 4 && p != null && p > 0) map[c] = p;
+  }
+  return Object.keys(map).length > 400 ? map : null;
 }
 
-// margin_ratio 滾動庫：{asOf, count, series:[{d,v}]}
-// 首次（KV 空）自動回溯 60 個交易日＝120 發 TWSE；之後每天只補缺的那幾天（1 天＝2 發）。
-// 節奏比照 buildHigh5y：一天一天來、間隔 250ms，別把證交所打爆。
+// 單日維持率 v2（上市＋上櫃）：ymd = YYYYMMDD → { d:"MM/DD", v:百分比, amt:合併融資餘額(億) } 或 null
+// 護欄：四路（上市融資/上市收盤/上櫃融資/上櫃收盤）任一缺 → 整天放棄，絕不出「其實只有上市」的半套數字
+async function calcMarginRatio(ymd) {
+  const [det, close, detO, closeO] = await Promise.all([
+    fetchMarginDetail(ymd), fetchCloseMap(ymd), fetchTpexMargin(ymd), fetchTpexCloseMap(ymd),
+  ]);
+  if (!det || !close || !detO || !closeO) return null;
+  const sumMv = (units, cmap) => {
+    let mv = 0, hit = 0, miss = 0;
+    for (const code in units) {
+      const u = units[code], p = cmap[code];
+      if (!u) continue;
+      if (p == null) { miss += u; continue; }
+      mv += u * 1000 * p; hit++;
+    }
+    return { mv, hit, miss };
+  };
+  const a = sumMv(det.units, close), b = sumMv(detO.units, closeO);
+  const denom = (det.amountK + detO.amountK) * 1000;   // 仟元 → 元
+  if (!denom || !a.hit || !b.hit) return null;
+  const ratio = (a.mv + b.mv) / denom * 100;
+  if (!(ratio > 80 && ratio < 400)) {      // 合理區間護欄：正常落在 130~180
+    console.log(`⚠️ 維持率 ${ymd} 算出 ${ratio.toFixed(1)}% 不合理 → 放棄（市值=${a.mv + b.mv} 融資額=${denom}）`);
+    return null;
+  }
+  if (a.miss || b.miss) console.log(`維持率 ${ymd}：查無收盤價已排除（上市 ${a.miss} 張／上櫃 ${b.miss} 張）`);
+  return {
+    d: `${ymd.slice(4, 6)}/${ymd.slice(6, 8)}`,
+    v: +ratio.toFixed(1),
+    amt: +((det.amountK + detO.amountK) / 1e5).toFixed(1),   // 仟元 → 億（上市＋上櫃合併餘額）
+  };
+}
+
+// margin_ratio 滾動庫 v2：{ver:2, asOf, count, series:[{d,v,amt}]}（v=維持率% amt=上市＋上櫃融資餘額億）
+// 口徑版控：偵測到 v1（上市版）舊庫 → 整庫作廢重建，絕不讓新舊口徑混在同一條線（假跳崖）。
+// 首次/升級＝回溯 60 個交易日 × 4 發（TWSE×2＋TPEx×2）＝240 發；之後每天只補缺的（1 天＝4 發）。
 async function buildMarginRatio(maxDays = 60) {
-  const old = (await kvGet("margin_ratio")) || null;
+  const old0 = (await kvGet("margin_ratio")) || null;
+  const old = (old0 && old0.ver === 2) ? old0 : null;
+  if (old0 && !old) console.log("維持率：偵測到 v1（上市版）舊庫 → 口徑升級為上市＋上櫃，全庫重建");
   const have = new Set((old && old.series || []).map(x => x.d));
-  // 產生近 maxDays 個交易日（跳週末；國定假日靠 TWSE 回 stat!=OK 自然略過）
+  // 產生近 maxDays 個交易日（跳週末；國定假日靠 TWSE/TPEx 回無資料自然略過）
   const wants = [];
   for (let i = 0; wants.length < maxDays && i < maxDays * 2 + 20; i++) {
     const iso = shiftDateStr(twTradingDate(0), -i);
@@ -966,7 +1031,7 @@ async function buildMarginRatio(maxDays = 60) {
   wants.reverse();
   const todo = wants.filter(ymd => !have.has(`${ymd.slice(4, 6)}/${ymd.slice(6, 8)}`));
   if (!todo.length) { console.log(`維持率：已是最新（${have.size} 天），不需補`); return old; }
-  console.log(`維持率：需補 ${todo.length} 天（庫存 ${have.size} 天）→ 約 ${todo.length * 2} 發 TWSE`);
+  console.log(`維持率：需補 ${todo.length} 天（庫存 ${have.size} 天）→ 約 ${todo.length * 4} 發（TWSE×2＋TPEx×2）`);
 
   const got = [];
   for (const ymd of todo) {
@@ -974,21 +1039,21 @@ async function buildMarginRatio(maxDays = 60) {
       const r = await calcMarginRatio(ymd);
       if (r) got.push(r);
     } catch (e) { console.log(`維持率 ${ymd} error: ${e.message}`); }
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 300));
   }
-  const merged = new Map((old && old.series || []).map(x => [x.d, x.v]));
-  for (const g of got) merged.set(g.d, g.v);
+  const merged = new Map((old && old.series || []).map(x => [x.d, { v: x.v, amt: x.amt }]));
+  for (const g of got) merged.set(g.d, { v: g.v, amt: g.amt });
   // 依 MM/DD 排序時跨年會亂 → 用 wants 的順序當權威排序
   const order = new Map(wants.map((ymd, i) => [`${ymd.slice(4, 6)}/${ymd.slice(6, 8)}`, i]));
   const series = [...merged.entries()]
     .filter(([d]) => order.has(d))
     .sort((a, b) => order.get(a[0]) - order.get(b[0]))
     .slice(-maxDays)
-    .map(([d, v]) => ({ d, v }));
-  const pack = { asOf: twTradingDate(0), count: series.length, series };
+    .map(([d, o]) => ({ d, v: o.v, amt: o.amt != null ? o.amt : null }));
+  const pack = { ver: 2, asOf: twTradingDate(0), count: series.length, series };
   await kvPut("margin_ratio", pack, 86400 * 30);
   console.log(`維持率：新增 ${got.length} 天 → 庫存 ${series.length} 天` +
-    (series.length ? `，最新 ${series[series.length - 1].d}=${series[series.length - 1].v}%` : ""));
+    (series.length ? `，最新 ${series[series.length - 1].d}=${series[series.length - 1].v}%／餘額 ${series[series.length - 1].amt} 億` : ""));
   return pack;
 }
 
@@ -1046,11 +1111,11 @@ async function buildChipIndicators() {
     const end = twTradingDate(0);
     const start = shiftDateStr(end, -100);   // 100 日曆天 ≈ 65+ 交易日，取尾 60
     const startK = shiftDateStr(end, -185);  // K線要 60 根＋前置 59 根算 60MA
-    const [fut, mtx0, tmf0, mar, kraw, kraw2] = await Promise.all([
+    // 07-20 融資v2：融資餘額改讀維持率滾動庫（上市＋上櫃合併口徑），FinMind 整體融資(mar)退役
+    const [fut, mtx0, tmf0, kraw, kraw2] = await Promise.all([
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TX",  start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "MTX", start_date: start, end_date: end }),
       finmindGet("TaiwanFuturesInstitutionalInvestors", { data_id: "TMF", start_date: start, end_date: end }),
-      finmindGet("TaiwanStockTotalMarginPurchaseShortSale", { start_date: start, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TAIEX", start_date: startK, end_date: end }),
       finmindGet("TaiwanStockPrice", { data_id: "TPEx", start_date: startK, end_date: end }),
     ]);
@@ -1068,7 +1133,6 @@ async function buildChipIndicators() {
     if (!fut.ok) bad.push(`台指法人(status=${fut.status} msg=${(fut.msg||"-").slice(0,80)})`);
     if (!mtx0.ok) bad.push(`小台法人(status=${mtx0.status} msg=${(mtx0.msg||"-").slice(0,80)})`);
     if (!tmf0.ok) bad.push(`微台法人(status=${tmf0.status} msg=${(tmf0.msg||"-").slice(0,80)})`);
-    if (!mar.ok) bad.push(`整體融資(status=${mar.status} msg=${(mar.msg||"-").slice(0,80)})`);
     if (!kraw.ok) bad.push(`加權指數K線(status=${kraw.status} msg=${(kraw.msg||"-").slice(0,80)})`);
     if (!otcIdx.ok) bad.push(`櫃買指數K線(status=${otcIdx.status} msg=${(otcIdx.msg||"-").slice(0,80)})`);
     if (bad.length) console.log(`⚠️ 籌碼指標來源失敗：${bad.join("；")}`);
@@ -1094,15 +1158,7 @@ async function buildChipIndicators() {
     const rmap = netMap(mtx0);      // 小台＝主圖
     const rmap2 = netMap(tmf0);     // 微台＝副圖
     // ③ 整體融資（元 → 億）：name 匹配失敗時把清單留在 log 當遺言
-    const mmap = {}; const names = new Set();
-    for (const r of mar.data) {
-      const nm = String(r.name || ""); names.add(nm);
-      if (!(nm.includes("MarginPurchaseMoney") || nm.includes("融資金額"))) continue;
-      // 實測 log：TodayBalance 單位是「元」（07-06 印出 6308124.8億=除錯），元→億 除 1e8
-      const bal = (+r.TodayBalance || 0) / 1e8;
-      mmap[r.date] = { bal, chg: ((+r.TodayBalance || 0) - (+r.YesBalance || 0)) / 1e8 };
-    }
-    if (!Object.keys(mmap).length && mar.data.length) console.log(`⚠️ 融資表 name 無匹配，清單：${[...names].join(",").slice(0, 200)}`);
+    // （舊 mmap／FinMind 整體融資解析已於 07-20 v2 移除：融資餘額改由維持率滾動庫的 amt 供應）
 
 
     // ⑤ 指數雙K（加權＋櫃買）：60 根 K 棒＋20MA＋均線彎向＋逐日風度
@@ -1156,13 +1212,13 @@ async function buildChipIndicators() {
     const idx = { tse: buildIdx(kraw, "加權"), otc: buildIdx(otcIdx, "櫃買") };
 
     const tailN = (map, n) => Object.keys(map).sort().slice(-n);
-    const fD = tailN(fmap, 60), rD = tailN(rmap, 60), rD2 = tailN(rmap2, 60), mD = tailN(mmap, 60);
+    const fD = tailN(fmap, 60), rD = tailN(rmap, 60), rD2 = tailN(rmap2, 60);
     // 融資維持率（TWSE 自算、零 FinMind）：讀滾動庫並順手補今天
     let ratio = null;
     try { ratio = await buildMarginRatio(60); } catch (e) { console.log("維持率 build error:", e.message); }
     const mkSeries = (dates, map, round) => dates.map(d => ({ d: dlabel(d), v: round(map[d]) }));
     const pack = {
-      ok: !!(fD.length || rD.length || rD2.length || mD.length || idx.tse || idx.otc),
+      ok: !!(fD.length || rD.length || rD2.length || (ratio && ratio.series && ratio.series.length) || idx.tse || idx.otc),
       updatedAt: Date.now(),
       idx,
       foreign: fD.length ? {
@@ -1183,17 +1239,22 @@ async function buildChipIndicators() {
         latest: Math.round(rmap2[rD2[rD2.length - 1]]),
         chg: rD2.length > 1 ? Math.round(rmap2[rD2[rD2.length - 1]] - rmap2[rD2[rD2.length - 2]]) : 0,
       } : null,
-      margin: mD.length ? {
-        series: mkSeries(mD, mmap, o => +o.chg.toFixed(1)),
-        balSeries: mkSeries(mD, mmap, o => +o.bal.toFixed(1)),
-        bal: +mmap[mD[mD.length - 1]].bal.toFixed(1),
-        chg: +mmap[mD[mD.length - 1]].chg.toFixed(1),
-        // 融資維持率副圖（證交所自算、僅上市）：166%=融資買進當下、130%=券商追繳線
-        ratioSeries: (ratio && ratio.series && ratio.series.length) ? ratio.series : null,
-        ratio: (ratio && ratio.series && ratio.series.length) ? ratio.series[ratio.series.length - 1].v : null,
-        ratioChg: (ratio && ratio.series && ratio.series.length > 1)
-          ? +(ratio.series[ratio.series.length - 1].v - ratio.series[ratio.series.length - 2].v).toFixed(1) : null,
-      } : null,
+      // 融資餘額＋維持率（07-20 v2：全讀維持率滾動庫＝上市＋上櫃合併口徑；FinMind 整體融資退役）
+      margin: (() => {
+        const ms = (ratio && ratio.series) ? ratio.series.filter(x => x.amt != null) : [];
+        if (!ms.length) return null;
+        return {
+          series: ms.map((x, i) => ({ d: x.d, v: i ? +(x.amt - ms[i - 1].amt).toFixed(1) : 0 })),   // 變動柱（首日無前值＝0）
+          balSeries: ms.map(x => ({ d: x.d, v: x.amt })),
+          bal: ms[ms.length - 1].amt,
+          chg: ms.length > 1 ? +(ms[ms.length - 1].amt - ms[ms.length - 2].amt).toFixed(1) : 0,
+          // 融資維持率副圖（證交所＋櫃買自算、上市＋上櫃）：166%=融資買進當下、130%=券商追繳線
+          ratioSeries: ratio.series,
+          ratio: ratio.series[ratio.series.length - 1].v,
+          ratioChg: ratio.series.length > 1
+            ? +(ratio.series[ratio.series.length - 1].v - ratio.series[ratio.series.length - 2].v).toFixed(1) : null,
+        };
+      })(),
       vix: (() => {
         const vd = Object.keys(vixMap).sort().slice(-60);
         if (!vd.length) return null;
@@ -1207,7 +1268,7 @@ async function buildChipIndicators() {
     };
     if (pack.ok) {
       await kvPut("chip_indicators", pack, 86400 * 7);
-      console.log(`籌碼指標更新：外資${fD.length}天 / 小台${rD.length}天 / 微台${rD2.length}天 / 融資${mD.length}天 / 加權K${idx.tse ? idx.tse.series.length : 0} / 櫃買K${idx.otc ? idx.otc.series.length : 0}` +
+      console.log(`籌碼指標更新：外資${fD.length}天 / 小台${rD.length}天 / 微台${rD2.length}天 / 融資${pack.margin ? pack.margin.balSeries.length : 0}天 / 加權K${idx.tse ? idx.tse.series.length : 0} / 櫃買K${idx.otc ? idx.otc.series.length : 0}` +
         (pack.margin ? `｜融資餘額=${pack.margin.bal}億（變動${pack.margin.chg >= 0 ? "+" : ""}${pack.margin.chg}億）` : "") +
         (pack.vix ? `｜台指VIX=${pack.vix.latest}（${pack.vix.series.length}天）` : "｜台指VIX:無") +
         (pack.margin && pack.margin.ratio != null ? `｜融資維持率=${pack.margin.ratio}%（${pack.margin.ratioSeries.length}天）` : "｜融資維持率:無"));
@@ -1985,8 +2046,15 @@ app.get("/api/margin-probe", async (req, res) => {
 });
 
 app.get("/api/tw-margin-ratio", async (req, res) => {
-  try { res.json(await buildMarginRatio(+req.query.days || 60)); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  try {
+    const days = +req.query.days || 60;
+    const cur = await kvGet("margin_ratio");
+    if (!cur || cur.ver !== 2) {   // 空庫或 v1 舊口徑 → 全庫重建 240 發約 3 分鐘，背景跑、立即回應
+      buildMarginRatio(days).catch(e => console.error("維持率重建(背景) error:", e.message));
+      return res.json({ ok: true, started: true, note: "口徑升級（上市＋上櫃）全庫重建已在背景啟動（約240發／3分鐘），完成後打 /api/margin-ratio 驗收" });
+    }
+    res.json(await buildMarginRatio(days));   // 日常補當天（4 發）走同步
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 // 讀 KV margin_ratio
 app.get("/api/margin-ratio", async (req, res) => {
