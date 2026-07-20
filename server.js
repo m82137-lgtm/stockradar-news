@@ -1922,6 +1922,53 @@ app.get("/api/tv-rebuild", async (req, res) => {
 });
 
 // 重建/補齊維持率滾動庫（首次＝回溯60天約120發，之後只補缺的）
+// ── 融資 v2 偵察彈（上市＋上櫃前置）：探 TPEx 歷史端點生死與格式，只讀不寫 ──
+// 用法：/api/margin-probe（預設最近交易日）或 ?d=2026-07-17
+// 目標：①OpenAPI swagger 目錄（官方到底有哪些融資端點，不用猜名）②舊制融資餘額表(帶民國日期)
+//       ③新制 www 融資端點 ④舊制上櫃歷史收盤 ⑤新制 www 上櫃歷史收盤
+app.get("/api/margin-probe", async (req, res) => {
+  const iso = String(req.query.d || twTradingDate(0));           // YYYY-MM-DD
+  const [yy, mm, dd] = iso.split("-");
+  const roc = `${(+yy) - 1911}/${mm}/${dd}`;                     // 民國 115/07/17
+  const H = {
+    "User-Agent": BROWSER_UA,
+    "Accept": "application/json,text/html,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    "Referer": "https://www.tpex.org.tw/zh-tw/index.html",
+  };
+  async function hit(name, url) {
+    const t0 = Date.now();
+    try {
+      const r = await fetch(url, { headers: H });
+      const txt = await r.text();
+      let j = null; try { j = JSON.parse(txt); } catch {}
+      const out = { name, url, status: r.status, ms: Date.now() - t0, len: txt.length, isJson: !!j, head: txt.slice(0, 260) };
+      if (j) {
+        out.topKeys = Object.keys(j).slice(0, 12);
+        if (Array.isArray(j)) { out.arrLen = j.length; out.firstItem = j[0]; }
+        if (j.tables) out.tables = j.tables.map(t => ({ title: (t.title || "").slice(0, 30), fields: (t.fields || []).slice(0, 14), rows: (t.data || []).length }));
+        if (j.aaData) { out.aaLen = j.aaData.length; out.aaFirst = j.aaData[0]; out.aaTfoot = j.tfootData ? j.tfootData.slice(0, 14) : null; }
+        if (j.paths) out.marginPaths = Object.keys(j.paths).filter(p => /margin|sbl|balance|融資/i.test(p)).slice(0, 20); // swagger 目錄濾融資相關
+      }
+      return out;
+    } catch (e) { return { name, url, error: e.message, ms: Date.now() - t0 }; }
+  }
+  const out = { at: new Date().toISOString(), iso, roc, probes: [] };
+  const targets = [
+    ["swagger目錄", "https://www.tpex.org.tw/openapi/swagger.json"],
+    ["swagger目錄v1", "https://www.tpex.org.tw/openapi/v1/swagger.json"],
+    ["舊制_融資餘額表", `https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d=${encodeURIComponent(roc)}`],
+    ["新制_融資餘額", `https://www.tpex.org.tw/www/zh-tw/margin/balance?date=${encodeURIComponent(roc)}&response=json`],
+    ["舊制_上櫃收盤", `https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&d=${encodeURIComponent(roc)}&se=EW&o=json`],
+    ["新制_上櫃收盤", `https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date=${encodeURIComponent(roc)}&response=json`],
+  ];
+  for (const [name, url] of targets) {
+    out.probes.push(await hit(name, url));
+    await new Promise(r => setTimeout(r, 400)); // 控速
+  }
+  res.json(out);
+});
+
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try { res.json(await buildMarginRatio(+req.query.days || 60)); }
   catch (e) { res.status(500).json({ ok: false, error: e.message }); }
