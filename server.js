@@ -2045,6 +2045,59 @@ app.get("/api/margin-probe", async (req, res) => {
   res.json(out);
 });
 
+// ── 有效題材偵察彈（台股10:15漲停名單前置）：驗 TV taiwan 覆蓋/high欄/漲停判定，只讀不寫 ──
+// 用法：/api/limitup-probe（盤中打才有意義；判定式＝當日最高 ≥ 前收×1.095，前收由 close/change 反推）
+app.get("/api/limitup-probe", async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const body = {
+      filter: [{ left: "type", operation: "equal", right: "stock" }],
+      options: { lang: "zh_TW" },
+      markets: ["taiwan"],
+      symbols: { query: { types: [] }, tickers: [] },
+      columns: ["name", "description", "close", "change", "high", "low", "volume", "exchange", "type", "subtype"],
+      sort: { sortBy: "Value.Traded", sortOrder: "desc" },
+      range: [0, 3000],
+    };
+    const resp = await fetch("https://scanner.tradingview.com/taiwan/scan", {
+      method: "POST",
+      headers: {
+        "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+        "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+      },
+      body: JSON.stringify(body),
+    });
+    const raw = await resp.text();
+    if (!resp.ok) return res.json({ ok: false, status: resp.status, head: raw.slice(0, 200) });
+    const j = JSON.parse(raw);
+    const rows = (j.data || []).map(r => {
+      const d = {}; ["name", "description", "close", "change", "high", "low", "volume", "exchange", "type", "subtype"].forEach((c, i) => { d[c] = r.d[i]; });
+      const [ex, code] = String(r.s || "").split(":");
+      return { code, ex, ...d };
+    });
+    // 交易所分佈（看上櫃 TPEX 有沒有進來）
+    const byEx = {};
+    for (const r of rows) byEx[r.ex] = (byEx[r.ex] || 0) + 1;
+    // 漲停判定：前收 = close/(1+change/100)，最高 ≥ 前收×1.095（A：曾觸及）
+    const limitUp = [];
+    for (const r of rows) {
+      if (!Number.isFinite(r.close) || !Number.isFinite(r.change) || !Number.isFinite(r.high)) continue;
+      const prev = r.close / (1 + r.change / 100);
+      if (prev > 0 && r.high >= prev * 1.095) limitUp.push({ code: r.code, ex: r.ex, name: r.description, close: r.close, chg: r.change, high: r.high, prev: +prev.toFixed(2) });
+    }
+    limitUp.sort((a, b) => b.chg - a.chg);
+    res.json({
+      ok: true, ms: Date.now() - t0, totalCount: j.totalCount, rows: rows.length,
+      byExchange: byEx,
+      highNullCount: rows.filter(r => !Number.isFinite(r.high)).length,
+      limitUpCount: limitUp.length,
+      limitUp: limitUp.slice(0, 40),
+      sample: rows.slice(0, 3),
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message, ms: Date.now() - t0 }); }
+});
+
+// ── 有效題材偵察彈（台股10:15漲停名單前置）ここまで ──
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try {
     const days = +req.query.days || 60;
