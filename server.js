@@ -2325,8 +2325,10 @@ async function buildUsTop50Tv() {
       const code = String(r.s || "").split(":")[1] || "";
       if (!code || isUsEtf(code)) continue;                  // 舊黑名單續用當第二道保險（type=stock 已擋大宗 ETF）
       if (!Number.isFinite(d.close) || d.close <= 0) continue;
+      const hitZh = TV_ZH_US[code];
       rows.push({
         code, name: d.description || code,
+        zh: hitZh ? hitZh[0] : null, // 顯示用中文（方案A）；name 欄不動、照舊餵 Gemini
         price: Math.round(d.close * 100) / 100,
         chg: Number.isFinite(d.change) ? Math.round(d.change * 100) / 100 : 0,
         dollarVol: Math.round(d["Value.Traded"] || 0), vol: d.volume || 0,
@@ -2375,6 +2377,7 @@ async function buildUsTop50() {
       if (p && p.c > 0) chgPct = ((close - p.c) / p.c) * 100;
       rows.push({
         code: ticker, name: wl.names[ticker] || ticker,   // 名稱來自白名單；抓不到(如限流漏掉的W~Z)則顯示代號
+        zh: TV_ZH_US[ticker] ? TV_ZH_US[ticker][0] : null, // 顯示用中文（與 TV 版一致）
         price: Math.round(close * 100) / 100,
         chg: Math.round(chgPct * 100) / 100,
         dollarVol: Math.round(vwap * vol), vol,
