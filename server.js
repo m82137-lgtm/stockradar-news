@@ -26,7 +26,7 @@ const TG_TOKEN = process.env.TG_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const FINMIND_TOKEN = process.env.FINMIND_TOKEN || "";   // 籌碼三指標用；沒填也能跑（300次/hr）
 
-const HOT_SECTOR_KEEP_DAYS = 30;
+const HOT_SECTOR_KEEP_DAYS = 90;   // 07-21 有效題材案：保存 30→90 天
 
 function now() {
   return new Date().toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
@@ -490,16 +490,23 @@ async function updateSectorNews() {
         it.stocks = old.stocks;
       }
       if (old.chipTries && !it.chipTries) it.chipTries = old.chipTries;
+      if (Array.isArray(old.eff) && !it.eff) it.eff = old.eff;   // ⚡有效標記同 stocks 防洗（重爬進來的新版沒 eff，別把已標的洗掉）
     }
 
-    // 合併保留 15 天
+    // 合併保留 90 天
     const merged = mergeNews(newItems, oldItems, HOT_SECTOR_KEEP_DAYS);
 
     // chip 補爬：對合併後仍缺 chip 的補抓，跟著下面同一次 KV 寫入、零額外寫入
     if (mapReady) await refillChips(merged, codeNameMap);
 
-    // 寫入 KV，TTL 16 天
-    const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 31);
+    // 有效題材：入庫時查當日漲停名單即標（10:20後到的新聞當下就有⚡；名單未建前入庫的由10:15班回頭補標）
+    try {
+      const lu = await kvGet("limit_up_today");
+      if (lu) { let st = 0; for (const it of merged) if (stampEff(it, lu)) st++; if (st) console.log(`有效題材：本輪標記 ${st} 則`); }
+    } catch {}
+
+    // 寫入 KV，TTL 95 天
+    const ok = await kvPut('sectors', merged, 60 * 60 * 24 * 95);
     console.log(`熱門族群：${freshItems.length} 則新，合計 ${merged.length} 則，寫入KV ${ok ? '✅' : '❌'}`);
 
     // ── TG 推播：KV 寫入成功後，只推這次新進、且來源為富聯網的（連結乾淨可點）──
@@ -2098,6 +2105,95 @@ app.get("/api/limitup-probe", async (req, res) => {
 });
 
 // ── 有效題材偵察彈（台股10:15漲停名單前置）ここまで ──
+
+// ── 有效題材：每日 10:15 漲停名單（規則B＝10:15快照當下「現價仍 ≥ 前收×1.095」＝仍鎖/貼漲停；含無漲跌幅限制股）──
+// KV limit_up_today = { date, at, count, codes:{code:當下漲幅%} }
+// 10:15 主班（延遲源此刻反映≈10:00盤面＝「10點當下仍在停」）；10:20 補跑只在主班沒建成時出手
+async function buildLimitUpList(label) {
+  try {
+    const body = {
+      filter: [{ left: "type", operation: "equal", right: "stock" }],
+      options: { lang: "zh_TW" },
+      markets: ["taiwan"],
+      symbols: { query: { types: [] }, tickers: [] },
+      columns: ["name", "close", "change", "high"],
+      sort: { sortBy: "Value.Traded", sortOrder: "desc" },
+      range: [0, 3000],
+    };
+    const resp = await fetch("https://scanner.tradingview.com/taiwan/scan", {
+      method: "POST",
+      headers: {
+        "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+        "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+      },
+      body: JSON.stringify(body),
+    });
+    const raw = await resp.text();
+    if (!resp.ok) { console.log(`有效題材(${label})：TV HTTP ${resp.status} → 放棄`); return null; }
+    let j = null; try { j = JSON.parse(raw); } catch {}
+    if (!j || !Array.isArray(j.data) || j.data.length < 1500) { console.log(`有效題材(${label})：回檔異常（${j && j.data ? j.data.length : 0} 檔）→ 放棄`); return null; }
+    const codes = {};
+    for (const r of j.data) {
+      const close = r.d[1], chg = r.d[2], high = r.d[3];
+      if (!Number.isFinite(close) || !Number.isFinite(chg) || !Number.isFinite(high)) continue;
+      const prev = close / (1 + chg / 100);
+      if (prev > 0 && close >= prev * 1.095) {          // 規則B：現價仍在漲停價位（曾觸及但已打開的不算）
+        const code = String(r.s || "").split(":")[1];
+        if (code) codes[code] = +chg.toFixed(1);        // 存當下漲幅%
+      }
+    }
+    const n = Object.keys(codes).length;
+    if (n > 400) { console.log(`有效題材(${label})：${n} 檔多到不合理 → 放棄`); return null; }
+    const pack = { date: twTradingDate(0), at: new Date().toISOString(), count: n, codes };
+    await kvPut("limit_up_today", pack, 86400 * 3);
+    console.log(`有效題材(${label})：${pack.date} 名單 ${n} 檔`);
+    await restampSectorNews(pack);   // 回頭補標今天已入庫（10:20前到）的新聞
+    return pack;
+  } catch (e) { console.log(`有效題材(${label}) error: ${e.message}`); return null; }
+}
+// 新聞發布時間 → 台北日期（YYYY-MM-DD）
+function newsTwDate(pub) {
+  try { const t = new Date(pub).getTime(); if (!Number.isFinite(t)) return ""; return new Date(t + 8 * 3600e3).toISOString().slice(0, 10); } catch { return ""; }
+}
+// 對單則新聞蓋⚡：只認「新聞當天」的名單（六日新聞天然無名單＝不標）。eff 存進新聞資料＝永久
+function stampEff(item, pack) {
+  if (!pack || !pack.codes || !Array.isArray(item.stocks) || !item.stocks.length) return false;
+  if (newsTwDate(item.pub) !== pack.date) return false;
+  const eff = item.stocks.filter(s => pack.codes[s.code] != null).map(s => s.code);
+  if (!eff.length) return false;
+  const same = Array.isArray(item.eff) && item.eff.length === eff.length && item.eff.every((c, i) => c === eff[i]);
+  if (same) return false;
+  item.eff = eff;
+  return true;
+}
+async function restampSectorNews(pack) {
+  try {
+    const items = await kvGet("sectors");
+    if (!Array.isArray(items) || !items.length) return;
+    let changed = 0;
+    for (const it of items) if (stampEff(it, pack)) changed++;
+    if (changed) {
+      const ok = await kvPut("sectors", items, 60 * 60 * 24 * 95);
+      console.log(`有效題材：回頭補標 ${changed} 則，寫入KV ${ok ? "✅" : "❌"}`);
+    }
+  } catch (e) { console.log("restampSectorNews error:", e.message); }
+}
+// 班表（UTC）：台北平日 10:15 主班、10:20 條件補跑
+cron.schedule("15 2 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) buildLimitUpList("10:15主班"); });
+cron.schedule("20 2 * * *", async () => {
+  const d = twDow(); if (d < 1 || d > 5) return;
+  const cur = await kvGet("limit_up_today");
+  if (cur && cur.date === twTradingDate(0)) { console.log("有效題材(10:20補)：主班已建，跳過"); return; }
+  buildLimitUpList("10:20補跑");
+});
+// 手動救援：/api/limitup-rebuild
+app.get("/api/limitup-rebuild", async (req, res) => {
+  try {
+    const p = await buildLimitUpList("手動");
+    p ? res.json({ ok: true, date: p.date, count: p.count, codes: p.codes }) : res.status(502).json({ ok: false, error: "建立失敗，看 log" });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try {
     const days = +req.query.days || 60;
