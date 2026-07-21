@@ -2352,19 +2352,22 @@ app.get("/api/stock-news", async (req, res) => {
     return res.json([{ time: now(), keyword: "", items: [] }]);
   }
 
-  // 「股名 股號」+「純股號」兩組，都要求含股號擋同名詞雜訊。
+  // 「股名 股號」+「純股號」+「純股名」三組（07-22 使用者定案）。
+  // 組與組=OR（聯集去重）；組內空格=AND。精準組雖是子集仍保留＝各自領 40 則配額的快速道。
   // 查詢階段就排除 CMoney（-排除語法）：否則 CMoney 一天十幾篇把 RSS 前20則 quota 吃光，
   // 事後黑名單救不回被擠掉的正常新聞（曾致合晶只剩4則、7/8前全空）。
   const EXCL = " -CMoney";
   const searches = [...new Set(
-    [name && code ? `${name} ${code}${EXCL}` : '', code ? `${code}${EXCL}` : ''].filter(q => q.trim())
+    [name && code ? `${name} ${code}${EXCL}` : '', code ? `${code}${EXCL}` : '', name ? `${name}${EXCL}` : ''].filter(q => q.trim())
   )];
   let allItems = [];
 
   for (const q of searches) {
     try {
       const rss = await fetchGoogleRSS(q);
-      const items = parseRSS(rss, 40);
+      let items = parseRSS(rss, 40);
+      // 純股名組安全帶：標題必須含股名才收（RSS 連內文提到都算中，「大同」「長榮」這類名字不擋會整條街進來）
+      if (name && q === `${name}${EXCL}`) items = items.filter(it => String(it.title || "").includes(name));
       allItems.push(...items);
     } catch (e) {
       console.log("RSS fail:", q);
