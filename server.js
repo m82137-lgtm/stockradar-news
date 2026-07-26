@@ -986,8 +986,10 @@ async function fetchTpexCloseMap(ymd) {
   return Object.keys(map).length > 400 ? map : null;
 }
 
-// 單日維持率 v2（上市＋上櫃）：ymd = YYYYMMDD → { d:"MM/DD", v:百分比, amt:合併融資餘額(億) } 或 null
-// 護欄：四路（上市融資/上市收盤/上櫃融資/上櫃收盤）任一缺 → 整天放棄，絕不出「其實只有上市」的半套數字
+// 單日維持率 v3（上市＋上櫃、分子不含 ETF）：{ d, v:維持率%, amt:官方融資餘額(億) }
+// v3 口徑（2026-07-26 定案）：分子（融資市值）剔除代號 00 開頭（ETF/ETN，probe 實測 344 檔零個股誤傷、佔分子 3.8%）；
+// 分母＝官方融資金額總計（無逐檔金額可剔）→ 僅分子剔除，與 MacroMicro 同法。抓斷頭風險更聚焦個股。
+// 護欄：四路任一缺 → 整天放棄，絕不出半套數字
 async function calcMarginRatio(ymd) {
   const [det, close, detO, closeO] = await Promise.all([
     fetchMarginDetail(ymd), fetchCloseMap(ymd), fetchTpexMargin(ymd), fetchTpexCloseMap(ymd),
@@ -996,6 +998,7 @@ async function calcMarginRatio(ymd) {
   const sumMv = (units, cmap) => {
     let mv = 0, hit = 0, miss = 0;
     for (const code in units) {
+      if (code.startsWith("00")) continue;   // v3：ETF/ETN 不進分子
       const u = units[code], p = cmap[code];
       if (!u) continue;
       if (p == null) { miss += u; continue; }
@@ -1019,13 +1022,13 @@ async function calcMarginRatio(ymd) {
   };
 }
 
-// margin_ratio 滾動庫 v2：{ver:2, asOf, count, series:[{d,v,amt}]}（v=維持率% amt=上市＋上櫃融資餘額億）
-// 口徑版控：偵測到 v1（上市版）舊庫 → 整庫作廢重建，絕不讓新舊口徑混在同一條線（假跳崖）。
+// margin_ratio 滾動庫 v3：{ver:3, asOf, count, series:[{d,v,amt}]}（v=維持率%·分子不含ETF；amt=官方餘額億）
+// 口徑版控：偵測到 ver≠3 舊庫（v1上市版/v2含ETF版）→ 整庫作廢重建，新舊口徑絕不混線（假跳崖）。
 // 首次/升級＝回溯 60 個交易日 × 4 發（TWSE×2＋TPEx×2）＝240 發；之後每天只補缺的（1 天＝4 發）。
 async function buildMarginRatio(maxDays = 60) {
   const old0 = (await kvGet("margin_ratio")) || null;
-  const old = (old0 && old0.ver === 2) ? old0 : null;
-  if (old0 && !old) console.log("維持率：偵測到 v1（上市版）舊庫 → 口徑升級為上市＋上櫃，全庫重建");
+  const old = (old0 && old0.ver === 3) ? old0 : null;
+  if (old0 && !old) console.log("維持率：偵測到舊口徑庫（ver=" + (old0.ver || 1) + "）→ 升級 v3（分子剔ETF），全庫重建");
   const have = new Set((old && old.series || []).map(x => x.d));
   // 產生近 maxDays 個交易日（跳週末；國定假日靠 TWSE/TPEx 回無資料自然略過）
   const wants = [];
@@ -1057,7 +1060,7 @@ async function buildMarginRatio(maxDays = 60) {
     .sort((a, b) => order.get(a[0]) - order.get(b[0]))
     .slice(-maxDays)
     .map(([d, o]) => ({ d, v: o.v, amt: o.amt != null ? o.amt : null }));
-  const pack = { ver: 2, asOf: twTradingDate(0), count: series.length, series };
+  const pack = { ver: 3, asOf: twTradingDate(0), count: series.length, series };
   await kvPut("margin_ratio", pack, 86400 * 30);
   console.log(`維持率：新增 ${got.length} 天 → 庫存 ${series.length} 天` +
     (series.length ? `，最新 ${series[series.length - 1].d}=${series[series.length - 1].v}%／餘額 ${series[series.length - 1].amt} 億` : ""));
@@ -2237,9 +2240,9 @@ app.get("/api/tw-margin-ratio", async (req, res) => {
   try {
     const days = +req.query.days || 60;
     const cur = await kvGet("margin_ratio");
-    if (!cur || cur.ver !== 2) {   // 空庫或 v1 舊口徑 → 全庫重建 240 發約 3 分鐘，背景跑、立即回應
+    if (!cur || cur.ver !== 3) {   // 空庫或舊口徑 → 全庫重建 240 發約 3 分鐘，背景跑、立即回應
       buildMarginRatio(days).catch(e => console.error("維持率重建(背景) error:", e.message));
-      return res.json({ ok: true, started: true, note: "口徑升級（上市＋上櫃）全庫重建已在背景啟動（約240發／3分鐘），完成後打 /api/margin-ratio 驗收" });
+      return res.json({ ok: true, started: true, note: "口徑升級 v3（分子剔ETF）全庫重建已在背景啟動（約240發／3分鐘），完成後打 /api/margin-ratio 驗收" });
     }
     res.json(await buildMarginRatio(days));   // 日常補當天（4 發）走同步
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
