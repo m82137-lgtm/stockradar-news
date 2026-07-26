@@ -2244,6 +2244,32 @@ app.get("/api/margin-etf-probe", async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// ── 自製K線（2026-07-26 K線案）：個股 10 年日K，FinMind 現抓＋當日記憶體快取（零 KV） ──
+// 回 {ok, code, asOf, count, rows:[[date,o,h,l,c,vol張],...]}；vol=Trading_Volume(股)/1000
+const klineCache = new Map();
+app.get("/api/stock-kline", async (req, res) => {
+  try {
+    const code = String(req.query.code || "").trim().toUpperCase();
+    if (!/^[0-9A-Z]{4,6}$/.test(code)) return res.status(400).json({ ok: false, error: "code 格式不對" });
+    const today = twTradingDate(0);
+    const hit = klineCache.get(code);
+    if (hit && hit.day === today) return res.json(hit.pack);
+    const start = shiftDateStr(today, -3660);   // 約 10 年（月K 的 MA60 全程可畫）
+    const r = await finmindGet("TaiwanStockPrice", { data_id: code, start_date: start, end_date: today });
+    if (!r.ok || !Array.isArray(r.data) || !r.data.length) {
+      return res.status(502).json({ ok: false, error: `FinMind 無資料（status=${r.status} msg=${(r.msg || "-").slice(0, 60)}）` });
+    }
+    const rows = r.data
+      .filter(x => x.date && +x.close > 0)
+      .map(x => [x.date, +(+x.open).toFixed(2), +(+x.max).toFixed(2), +(+x.min).toFixed(2), +(+x.close).toFixed(2), Math.round((+x.Trading_Volume || 0) / 1000)]);
+    if (rows.length < 5) return res.status(502).json({ ok: false, error: `有效日K僅 ${rows.length} 筆` });
+    const pack = { ok: true, code, asOf: today, count: rows.length, rows };
+    klineCache.set(code, { day: today, pack });
+    if (klineCache.size > 200) klineCache.delete(klineCache.keys().next().value);   // 粗 LRU 護欄
+    res.json(pack);
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try {
     const days = +req.query.days || 60;
