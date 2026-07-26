@@ -1341,6 +1341,14 @@ async function buildHigh5y() {
         }
         if (hi > 0) map[code] = { v: +hi.toFixed(2), d: hiD };
         else failed.push(code);   // 資料不足22筆（新上市）或無有效價
+        // MA60 季線（基準=昨收；07-27 起漲K/量增K「站上季線」條件用）：不足 60 根不給值＝盤中放行
+        if (map[code]) {
+          const closesAll = rows.map(x => +x.close).filter(c => isFinite(c) && c > 0);
+          if (closesAll.length >= 60) {
+            const seg60 = closesAll.slice(-60);
+            map[code].ma60 = +(seg60.reduce((m, c) => m + c, 0) / 60).toFixed(2);
+          }
+        }
         // RS 相對動能：近20交易日「個股倍率 ÷ 加權倍率 −1」(%)；
         // 護欄：不滿21根→不給值；相鄰兩根變動>±10.5%（台股漲跌停極限外）→視為除權息/減資缺口，不給值
         if (idxCloseByDate) {
