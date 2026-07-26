@@ -2194,6 +2194,45 @@ app.get("/api/limitup-rebuild", async (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+// ── 融資 v3 偵察彈（不含ETF前置）：列出兩市場「00 開頭」清單＋試算剔除前後維持率並排，只讀不寫 ──
+// 重要口徑限制：融資「金額」只有官方總計、無逐檔金額可剔 → 剔除只能做在分子（市值），與 MacroMicro 同法。
+app.get("/api/margin-etf-probe", async (req, res) => {
+  try {
+    const iso = String(req.query.d || twTradingDate(0));
+    const ymd = iso.replace(/-/g, "");
+    const [det, close, detO, closeO] = await Promise.all([
+      fetchMarginDetail(ymd), fetchCloseMap(ymd), fetchTpexMargin(ymd), fetchTpexCloseMap(ymd),
+    ]);
+    if (!det || !close || !detO || !closeO) return res.json({ ok: false, error: "四路資料未齊", have: { twse融資: !!det, twse收盤: !!close, tpex融資: !!detO, tpex收盤: !!closeO } });
+    // 帶名字的 00 開頭清單（探針專用另抓原始表，不動生產解析）
+    async function twse00() {
+      const r = await fetchHtml(`https://www.twse.com.tw/exchangeReport/MI_MARGN?response=json&date=${ymd}&selectType=ALL`);
+      const j = JSON.parse(r); const t = twseTables(j).find(t => (t.data || []).length > 500 && (t.fields || []).length >= 14);
+      return (t ? t.data : []).filter(row => String(twseCode(row[0])).startsWith("00")).map(row => ({ code: twseCode(row[0]), name: String(row[1] || "").trim(), units: twseNum(row[6]) || 0 }));
+    }
+    async function tpex00() {
+      const r = await fetchHtml(`https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d=${encodeURIComponent(isoToRoc(ymd))}`);
+      const j = JSON.parse(r); const t = j.tables && j.tables[0];
+      return ((t && t.data) || []).filter(row => String(twseCode(row[0])).startsWith("00")).map(row => ({ code: twseCode(row[0]), name: String(row[1] || "").trim(), units: twseNum(row[6]) || 0 }));
+    }
+    const l1 = await twse00(), l2 = await tpex00();
+    const mvOf = (units, cmap, excl00) => { let mv = 0; for (const c in units) { if (excl00 && c.startsWith("00")) continue; const p = cmap[c]; if (p != null && units[c]) mv += units[c] * 1000 * p; } return mv; };
+    const mvAll = mvOf(det.units, close, false) + mvOf(detO.units, closeO, false);
+    const mvNo00 = mvOf(det.units, close, true) + mvOf(detO.units, closeO, true);
+    const denom = (det.amountK + detO.amountK) * 1000;
+    const sum = a => a.reduce((m, x) => m + (x.units || 0), 0);
+    res.json({
+      ok: true, date: iso,
+      現行v2_含ETF: +(mvAll / denom * 100).toFixed(1),
+      試算_分子剔除00開頭: +(mvNo00 / denom * 100).toFixed(1),
+      ETF市值佔分子比: +((1 - mvNo00 / mvAll) * 100).toFixed(1) + "%",
+      口徑註: "分母＝官方融資金額總計（無逐檔金額可剔）→ 僅分子剔除，與 MacroMicro 同法",
+      上市00開頭: { 檔數: l1.length, 融資張合計: sum(l1), 前15大: l1.slice().sort((a, b) => b.units - a.units).slice(0, 15) },
+      上櫃00開頭: { 檔數: l2.length, 融資張合計: sum(l2), 前15大: l2.slice().sort((a, b) => b.units - a.units).slice(0, 15) },
+    });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
 app.get("/api/tw-margin-ratio", async (req, res) => {
   try {
     const days = +req.query.days || 60;
