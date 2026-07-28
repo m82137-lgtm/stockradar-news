@@ -1348,6 +1348,11 @@ async function buildHigh5y() {
             const seg60 = closesAll.slice(-60);
             map[code].ma60 = +(seg60.reduce((m, c) => m + c, 0) / 60).toFixed(2);
           }
+          // MA20 月線（07-29 均線下拉案）：同基準昨收；不足 20 根不給值＝旗標端視為無資料
+          if (closesAll.length >= 20) {
+            const seg20 = closesAll.slice(-20);
+            map[code].ma20 = +(seg20.reduce((m, c) => m + c, 0) / 20).toFixed(2);
+          }
         }
         // RS 相對動能：近20交易日「個股倍率 ÷ 加權倍率 −1」(%)；
         // 護欄：不滿21根→不給值；相鄰兩根變動>±10.5%（台股漲跌停極限外）→視為除權息/減資缺口，不給值
