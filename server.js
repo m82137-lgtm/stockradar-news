@@ -1957,11 +1957,61 @@ async function buildTvTop30(market, phase, fx) {
   return result;
 }
 
+// ── 指數卡（07-28）：日經/TOPIX/KOSPI/KOSDAQ/S&P/NASDAQ/道瓊/費半 ────────
+// TV 指數代碼未實測，採「多候選自癒」：每指數列 2~3 個候選 ticker，global scan 一發打包，
+// 回包誰有 close 用誰；全空 → 該指數不進 list（前端該卡不顯示，寧缺勿假），console 留對帳線索。
+const TV_IDX = [
+  { id: "ni225",  mk: "jp", zh: "日經 225",  en: "NIKKEI 225", cands: ["TVC:NI225", "INDEX:NKY", "OSE:NK2251!"] },
+  { id: "topix",  mk: "jp", zh: "TOPIX",     en: "東證指數",    cands: ["INDEX:TOPIX", "TVC:TOPIX", "TSE:TOPIX"] },
+  { id: "kospi",  mk: "kr", zh: "KOSPI",     en: "韓國綜合",    cands: ["KRX:KOSPI", "INDEX:KOSPI", "TVC:KOSPI"] },
+  { id: "kosdaq", mk: "kr", zh: "KOSDAQ",    en: "韓國創業板",  cands: ["KRX:KOSDAQ", "INDEX:KOSDAQ"] },
+  { id: "spx",    mk: "us", zh: "S&P 500",   en: "標普500",     cands: ["SP:SPX", "TVC:SPX", "CBOE:SPX"] },
+  { id: "ixic",   mk: "us", zh: "NASDAQ",    en: "那斯達克綜合", cands: ["NASDAQ:IXIC", "TVC:IXIC"] },
+  { id: "dji",    mk: "us", zh: "道瓊",      en: "道瓊工業",    cands: ["DJ:DJI", "TVC:DJI"] },
+  { id: "sox",    mk: "us", zh: "費半",      en: "費城半導體",  cands: ["NASDAQ:SOX", "TVC:SOX"] },
+];
+async function buildTvIndices(phase) {
+  const tickers = TV_IDX.flatMap(x => x.cands);
+  const body = {
+    symbols: { tickers, query: { types: [] } },
+    columns: ["name", "close", "change"],
+  };
+  const resp = await fetch("https://scanner.tradingview.com/global/scan", {
+    method: "POST",
+    headers: {
+      "User-Agent": BROWSER_UA, "Content-Type": "application/json", "Accept": "application/json",
+      "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+    },
+    body: JSON.stringify(body),
+  });
+  const raw = await resp.text();
+  if (!resp.ok) { console.error(`指數卡 HTTP ${resp.status} head=${raw.slice(0, 100)}`); return { ok: false, error: `HTTP ${resp.status}` }; }
+  let j = null; try { j = JSON.parse(raw); } catch {}
+  if (!j || !Array.isArray(j.data)) { console.error("指數卡 回包異常"); return { ok: false, error: "回包異常" }; }
+  const got = new Map(); // ticker → {close,chg}
+  for (const r of j.data) {
+    const close = r.d && r.d[1], chg = r.d && r.d[2];
+    if (Number.isFinite(close)) got.set(String(r.s), { close, chg: Number.isFinite(chg) ? Math.round(chg * 100) / 100 : null });
+  }
+  const list = [];
+  for (const x of TV_IDX) {
+    const hitT = x.cands.find(t => got.has(t));
+    if (!hitT) { console.log(`指數卡 ${x.id}: 全候選無資料（${x.cands.join(",")}）`); continue; }
+    const v = got.get(hitT);
+    list.push({ id: x.id, mk: x.mk, zh: x.zh, en: x.en, src: hitT, close: Math.round(v.close * 100) / 100, chg: v.chg });
+  }
+  const result = { ok: true, phase, asOf: new Date().toISOString(), count: list.length, list };
+  await kvPut("tv_indices", result, 86400 * 3);
+  console.log(`指數卡 ok count=${list.length}/${TV_IDX.length}`);
+  return result;
+}
+
 // 台北時區今天星期幾（0=日）
 function twDow() { return new Date(Date.now() + 8 * 3600e3).getUTCDay(); }
 
 async function runTvCron(markets, phase, label) {
   const fx = await tvFetchFx();
+  try { await buildTvIndices(phase); } catch (e) { console.error(`指數卡 cron(${label}) error:`, e.message); }
   for (const m of markets) {
     try {
       const r = await buildTvTop30(m, phase, fx);
@@ -1980,8 +2030,15 @@ cron.schedule("0 0 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runT
 // 前端主讀：一次回三市場
 app.get("/api/tv-top30", async (req, res) => {
   try {
-    const [jp, kr, us] = await Promise.all([kvGet("tv_jp_top30"), kvGet("tv_kr_top30"), kvGet("tv_us_top30")]);
-    res.json({ ok: true, jp: jp || null, kr: kr || null, us: us || null });
+    const [jp, kr, us, idx] = await Promise.all([kvGet("tv_jp_top30"), kvGet("tv_kr_top30"), kvGet("tv_us_top30"), kvGet("tv_indices")]);
+    res.json({ ok: true, jp: jp || null, kr: kr || null, us: us || null, indices: idx || null });
+  } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+// 指數卡單讀＋手動重建（偵察/救援用）
+app.get("/api/tv-indices", async (req, res) => {
+  try {
+    if (String(req.query.rebuild || "") === "1") return res.json(await buildTvIndices("manual"));
+    res.json((await kvGet("tv_indices")) || { ok: false, error: "尚無資料，可加 ?rebuild=1 立即建" });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 // 手動重建：/api/tv-rebuild（全部）或 ?market=jp|kr|us
