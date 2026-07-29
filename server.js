@@ -2026,7 +2026,7 @@ async function runTvCron(markets, phase, label) {
   }
 }
 // 班表（UTC）：日韓＝台北平日 8:45~14:45 每小時盤中班、15:00 收盤、15:30 補；美＝台北週二~六 7:30、8:00 補（美股台北清晨4~5點收）
-cron.schedule("45 0-6 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "live", "盤中每時"); });
+cron.schedule("0,15,30,45 0-6 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "live", "盤中每15分"); });   // 07-29:每時→每15分(日請求~112發,TV端仍屬安靜流量;指數卡同班順跑)
 cron.schedule("0 7 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "final", "15:00收盤"); });
 cron.schedule("30 7 * * *", () => { const d = twDow(); if (d >= 1 && d <= 5) runTvCron(["japan", "korea"], "final", "15:30補"); });
 cron.schedule("30 23 * * *", () => { const d = twDow(); if (d >= 2 && d <= 6) runTvCron(["america"], "final", "7:30美股"); });
