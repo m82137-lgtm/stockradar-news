@@ -423,16 +423,23 @@ async function updateSectorNews() {
   console.log(`[${now()}] 更新熱門族群新聞`);
 
   try {
-    // 並聯抓取：富聯網 + Google RSS 兩組關鍵字
+    // ── 族群RSS降頻（08-02）：本班掛 */5 全天跑，原本兩組 Google RSS 跟著每10分鐘落地一發
+    //    （~288發/日、深夜也打）＝全站 Google 流量最大宗，共享IP被503的主要自耗。
+    //    《熱門族群》只在台股盤中～盤後發稿 → Google 只在平日 07:00-17:00 整點班（xx:00~xx:04
+    //    的班次）打，一天 11 發×2 組；富聯網爬自家站不經 Google，維持每 5 分鐘不動。
+    const twN = new Date(Date.now() + 8 * 3600e3);
+    const rssOn = twN.getUTCDay() >= 1 && twN.getUTCDay() <= 5
+      && twN.getUTCHours() >= 7 && twN.getUTCHours() <= 17
+      && twN.getUTCMinutes() < 5;
     const [rss1, rss2, moneyLinkItems] = await Promise.all([
-      fetchGoogleRSS("富聯網 熱門族群"),
-      fetchGoogleRSS("熱門族群"),
+      rssOn ? fetchGoogleRSS("富聯網 熱門族群") : Promise.resolve(""),
+      rssOn ? fetchGoogleRSS("熱門族群") : Promise.resolve(""),
       fetchMoneyLink().catch(e => { console.log("富聯網 error:", e.message); return []; }),
     ]);
 
     // Google RSS 兩組合併，只留標題開頭「《熱門族群》」的
     const rssItems = [...parseRSS(rss1), ...parseRSS(rss2)].filter(it => isHotSectorTitle(it.title));
-    console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》（兩組關鍵字合計）`);
+    if (rssOn) console.log(`Google RSS：抓到 ${rssItems.length} 則《熱門族群》（兩組關鍵字合計）`);
 
     // 合併，依標題去重。富聯網排前面 → 同標題保留富聯網版(有真內頁能爬內文)
     const allItems = [...moneyLinkItems, ...rssItems];
