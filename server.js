@@ -77,11 +77,19 @@ async function kvPut(key, value, ttlSeconds) {
 }
 
 // ── Google RSS ─────────────────────────────────
-// Google News RSS：加瀏覽器 UA（防共享IP被當機器人）＋10分鐘記憶體快取（降請求量防限流）＋空結果印 status（診斷用）
-const _rssCache = new Map();   // keyword -> { at, text }
+// Google News RSS：加瀏覽器 UA（防共享IP被當機器人）＋記憶體快取（降請求量防限流）＋空結果印 status（診斷用）
+// 07-31 加：負快取＋全域熔斷。原本只存成功結果，在被限流時最傷——503 不進快取 → 每次呼叫都再敲一次
+// Google，等於限流期間敲門最勤（每點一檔股票就是 3 發：股名+股號 / 股號 / 股名）。
+const _rssCache = new Map();          // keyword -> { at, text, ok }
+const RSS_TTL_OK  = 10 * 60 * 1000;   // 有料：10 分鐘
+const RSS_TTL_BAD = 5 * 60 * 1000;    // 空/擋：5 分鐘（負快取，同 keyword 不連環敲）
+const RSS_BLOCK_MS = 15 * 60 * 1000;  // 熔斷時長：不死等 4hr，留提早恢復的餘地
+let _rssBlockUntil = 0;
 async function fetchGoogleRSS(keyword) {
+  // 快取查在熔斷之前：熔斷期間仍可吐先前抓到的有料結果，不是整個新聞區塊變空
   const hit = _rssCache.get(keyword);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.text;
+  if (hit && Date.now() - hit.at < (hit.ok ? RSS_TTL_OK : RSS_TTL_BAD)) return hit.text;
+  if (Date.now() < _rssBlockUntil) return "";   // 熔斷期間直接回空，一發都不打
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant`;
   try {
     const res = await fetch(url, {
@@ -92,14 +100,20 @@ async function fetchGoogleRSS(keyword) {
       },
     });
     const text = await res.text();
-    if (!res.ok || !text.includes("<item>")) {
+    const ok = res.ok && text.includes("<item>");
+    if (!ok) {
+      if (res.status === 503 || res.status === 429) {
+        const first = Date.now() >= _rssBlockUntil;
+        _rssBlockUntil = Date.now() + RSS_BLOCK_MS;
+        if (first) console.log(`⛔ Google RSS 熔斷啟動：status=${res.status}，停打 15 分鐘（共享IP限流）`);
+      }
       console.log(`⚠️ Google RSS「${keyword}」空/擋：status=${res.status} len=${text.length}（共享IP限流約4hr自復）`);
     }
-    if (text.includes("<item>")) _rssCache.set(keyword, { at: Date.now(), text });   // 只快取有料的
+    _rssCache.set(keyword, { at: Date.now(), text: ok ? text : "", ok });   // 有料/沒料都快取，TTL 不同
     if (_rssCache.size > 200) _rssCache.clear();   // 防記憶體膨脹，粗暴清空即可
-    return text;
+    return ok ? text : "";
   } catch (err) {
-    console.log("RSS error:", err.message);
+    console.log("RSS error:", err.message);   // 網路層錯誤不計入熔斷（未必是限流）
     return "";
   }
 }
@@ -1409,6 +1423,37 @@ async function buildHigh5y() {
   }
 }
 
+// ── 新高補基準（07-31）：昨天不在120池、今天直接竄進 Top50 的新面孔，0:00 那班算不到它 →
+//    h5 查無此人 → 創新高旗標整天「—」且凍進 tw_top50 不回溯。建榜當下對缺基準者現場補抓。
+//    口徑與 buildHigh5y 完全一致（同 asOf、同「排除最近22交易日」、同 ma20/ma60 算法）。
+//    護欄：上限 MAX 檔、單檔失敗略過，整段由呼叫端 try/catch 包住 → 補不到就退回原行為（「—」）。
+async function high5yFillMissing(codes, asOf, MAX = 15) {
+  const out = {};
+  const list = [...new Set(codes.map(String).filter(Boolean))].slice(0, MAX);
+  if (!list.length) return out;
+  const start = shiftDateStr(asOf, -1830);    // ~5 年，與 buildHigh5y 同
+  const rs = await Promise.all(list.map(code =>
+    finmindGet("TaiwanStockPrice", { data_id: code, start_date: start, end_date: asOf })
+      .then(r => ({ code, r })).catch(() => ({ code, r: null }))
+  ));
+  for (const { code, r } of rs) {
+    if (!r || !r.ok || !r.data.length) continue;
+    const rows = r.data
+      .filter(row => String(row.date) <= asOf && isFinite(+row.max) && +row.max > 0)
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    const usable = rows.slice(0, Math.max(0, rows.length - 22));   // 挖掉最近一個月
+    let hi = 0, hiD = "";
+    for (const row of usable) { const mx = +row.max; if (mx > hi) { hi = mx; hiD = row.date; } }
+    if (hi <= 0) continue;                    // 不足22筆（新上市）＝本來就沒五年高基準，維持「—」
+    const e = { v: +hi.toFixed(2), d: hiD };
+    const cl = rows.map(x => +x.close).filter(c => isFinite(c) && c > 0);
+    if (cl.length >= 60) e.ma60 = +(cl.slice(-60).reduce((m, c) => m + c, 0) / 60).toFixed(2);
+    if (cl.length >= 20) e.ma20 = +(cl.slice(-20).reduce((m, c) => m + c, 0) / 20).toFixed(2);
+    out[code] = e;
+  }
+  return out;
+}
+
 async function buildTwTop50() {
   try {
     // ── 抓上市 + 上櫃（都在 Render）──
@@ -1506,7 +1551,24 @@ async function buildTwTop50() {
     //    凍進 tw_top50 → 事後幾點看都對，不隨 0:00 更新失真。──
     try {
       const h5pack = await kvGet("high5y");
-      const h5 = (h5pack && h5pack.map) ? h5pack.map : {};
+      const h5 = (h5pack && h5pack.map) ? { ...h5pack.map } : {};
+      // 新高補基準：Top50 裡查不到基準的（昨天不在120池的新面孔，通常3-10檔）現場補抓。
+      // asOf 沿用 h5pack.asOf ＝與地圖上其他檔共用同一基準日，不會同表兩種口徑。
+      // 回寫 KV：18:00 補跑時 miss 已空＝零額外 FinMind；隔天盤中「月K」欄一併受惠。
+      try {
+        const miss = top50.map(s => String(s.code)).filter(c => h5[c] == null);
+        if (miss.length) {
+          const asOfP = (h5pack && h5pack.asOf) ? h5pack.asOf : twTradingDate(1);
+          const add = await high5yFillMissing(miss, asOfP);
+          Object.assign(h5, add);
+          console.log(`創新高 補基準：缺 ${miss.length} 檔 → 補到 ${Object.keys(add).length} 檔（asOf ${asOfP}）`);
+          if (Object.keys(add).length && h5pack && h5pack.map) {
+            h5pack.map = h5;
+            h5pack.count = Object.keys(h5).length;
+            await kvPut("high5y", h5pack, 86400 * 7);
+          }
+        }
+      } catch (e) { console.log("⚠️ 創新高 補基準失敗，退回原行為：" + e.message); }
       let nhCount = 0;
       for (const s of top50) {
         const hv = h5[String(s.code)];
@@ -2315,7 +2377,16 @@ app.get("/api/stock-kline", async (req, res) => {
     if (!/^[0-9A-Z]{4,6}$/.test(code)) return res.status(400).json({ ok: false, error: "code 格式不對" });
     const today = twTradingDate(0);
     const hit = klineCache.get(code);
-    if (hit && hit.day === today) return res.json(hit.pack);
+    // 週末快取修（08-01）：週五盤中建的快取缺當日定版棒（FinMind 盤後才出），週六 twTradingDate 回推
+    // 後 day 仍＝週五 → 舊包整個週末吐不停；而 quoteFresh 假日又正確擋活棒 → 週五真棒兩頭落空整根蒸發。
+    // 修：命中須「包尾已含定版當日」；未含且已過 14:30（FinMind 盤後更新）才重抓，10 分鐘節流防連環敲。
+    if (hit && hit.day === today) {
+      const lastD = hit.pack.rows[hit.pack.rows.length - 1][0];
+      const twNow = new Date(Date.now() + 8 * 3600e3);
+      const hm = twNow.getUTCHours() * 100 + twNow.getUTCMinutes();
+      const recentTry = hit.lastTry && (Date.now() - hit.lastTry < 10 * 60 * 1000);
+      if (lastD === today || hm < 1430 || recentTry) return res.json(hit.pack);
+    }
     const start = shiftDateStr(today, -3660);   // 約 10 年（月K 的 MA60 全程可畫）
     const r = await finmindGet("TaiwanStockPrice", { data_id: code, start_date: start, end_date: today });
     if (!r.ok || !Array.isArray(r.data) || !r.data.length) {
@@ -2326,7 +2397,7 @@ app.get("/api/stock-kline", async (req, res) => {
       .map(x => [x.date, +(+x.open).toFixed(2), +(+x.max).toFixed(2), +(+x.min).toFixed(2), +(+x.close).toFixed(2), Math.round((+x.Trading_Volume || 0) / 1000)]);
     if (rows.length < 5) return res.status(502).json({ ok: false, error: `有效日K僅 ${rows.length} 筆` });
     const pack = { ok: true, code, asOf: today, count: rows.length, rows };
-    klineCache.set(code, { day: today, pack });
+    klineCache.set(code, { day: today, lastTry: Date.now(), pack });
     if (klineCache.size > 200) klineCache.delete(klineCache.keys().next().value);   // 粗 LRU 護欄
     res.json(pack);
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
