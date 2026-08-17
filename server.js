@@ -1499,12 +1499,14 @@ async function buildTwTop50() {
       await kvPut("code_name_map", codeNameMap, 86400 * 3);
     } catch (e) { console.error("code_name_map error:", e.message); }
     // ② pending_stocklist：前120，隔天盤中警示池（08:30 由 Worker finalize 啟用）
+    // TTL 09:00→13:30（08-14）：原本 09:00 就過期，等於 08:30 那班一旦漏發，半小時後連補救的
+    // 原料都自動銷毀（當天只能改叫備胎、換掉選股口徑）。延到收盤，整個交易日內都補得回來。
     const pool = merged.slice(0, 120).map(s => ({
       code: s.code, name: s.name, market: s.market,
       prevLimit: s.chgPct >= 9.5,
       prevVol: s.vol || 0,
     }));
-    await kvPut("pending_stocklist", pool, ttlUntilTw(9, 0));
+    await kvPut("pending_stocklist", pool, ttlUntilTw(13, 30));
     // ③ afterhours：前60名中漲幅≥7%（盤後追蹤頁）
     const surging = merged.slice(0, 60)
       .filter(s => s.chgPct >= 7)
